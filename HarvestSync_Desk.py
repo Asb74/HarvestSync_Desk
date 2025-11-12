@@ -68,6 +68,13 @@ usuarios_dict = cargar_usuarios()
 root = tk.Tk()
 root.title("HarvestSync Desk")
 root.geometry("1250x700")
+try:
+    root.state("zoomed")
+except tk.TclError:
+    try:
+        root.attributes("-zoomed", True)
+    except tk.TclError:
+        pass
 style = ttk.Style(root)
 style.theme_use("clam")
 style.configure("TButton", padding=6, font=("Segoe UI", 10))
@@ -79,9 +86,11 @@ try:
     logo_img = Image.open(icon_path).resize((32, 32))
     logo_icon = ImageTk.PhotoImage(logo_img)
     root.iconphoto(False, logo_icon)
-except:
-    logo_icon=None
-    # Función personalizada para askstring con icono
+except Exception:  # noqa: BLE001 - mantener compatibilidad con ejecuciones empaquetadas
+    logo_icon = None
+
+root.logo_icon = logo_icon
+# Función personalizada para askstring con icono
     
 
 def custom_input_window(title, prompt):
