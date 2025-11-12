@@ -1,0 +1,26 @@
+# Python / entornos
+__pycache__/
+*.py[co]
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs y temporales
+*.log
+error_log.txt
+
+# Credenciales / claves
+*.json
+!package.json
+!pyproject.json
+
+# Builds / binarios grandes
+dist/
+build/
+output/
+*.exe
+*.zip
+*.msi

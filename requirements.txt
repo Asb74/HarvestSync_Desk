@@ -1,0 +1,8 @@
+# Dependencias de HarvestSync_Desk
+reportlab
+pillow
+tkcalendar
+pandas
+firebase_admin
+google-cloud-firestore
+pyinstaller
