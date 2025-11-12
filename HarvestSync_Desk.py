@@ -22,6 +22,7 @@ from datetime import datetime
 from informe_generator import generar_pdf
 from informe_generator_general import generar_pdf_general
 from informe_generator_comercial import generar_informe_comercial_desde_ui
+from herramientas import abrir_herramientas
 import sys, os
 import traceback
 #from tkinter.simpledialog import askstring
@@ -147,9 +148,10 @@ ttk.Button(frame_botones, text="🗑 Eliminar seleccionados", command=lambda: el
 ttk.Button(frame_botones, text="📊 Informe general", command=lambda: generar_informe_general()).grid(row=0, column=3, padx=10, pady=6)
 ttk.Button(frame_botones, text="🧮 Última Muestra", command=lambda: generar_informe_unico_por_boleta()).grid(row=0, column=4, padx=10, pady=6)
 ttk.Button(frame_botones, text="🌳 Aforo por boleta", command=lambda: calcular_aforo()).grid(row=0, column=5, padx=10, pady=6)
+ttk.Button(frame_botones, text="🛠️ Herramientas", command=lambda: abrir_herramientas(root, db)).grid(row=0, column=6, padx=10, pady=6)
 
 var_seleccionar_todo = tk.BooleanVar()
-ttk.Checkbutton(frame_botones, text="Seleccionar todas", variable=var_seleccionar_todo, command=lambda: toggle_seleccion()).grid(row=0, column=6, padx=10)
+ttk.Checkbutton(frame_botones, text="Seleccionar todas", variable=var_seleccionar_todo, command=lambda: toggle_seleccion()).grid(row=0, column=7, padx=10)
 
 # === Tabla ===
 columnas_tabla = ["IdMuestra", "Boleta", "Nombre", "Tipo", "Nombre Usuario", "CULTIVO"]
