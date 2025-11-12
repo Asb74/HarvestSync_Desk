@@ -316,7 +316,7 @@ class HerramientasWindow(tk.Toplevel):
         self.path_var = tk.StringVar(
             value=r"X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb"
         )
-        self.table_var = tk.StringVar(value="EEPP")
+        self.table_var = tk.StringVar(value="DEEPP")
 
         self._build_ui()
 
