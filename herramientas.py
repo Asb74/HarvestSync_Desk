@@ -312,6 +312,7 @@ class HerramientasWindow(tk.Toplevel):
         self.db = db_firestore
         self.title("Herramientas")
         self.resizable(True, False)
+        self._apply_master_icon(master)
 
         self.path_var = tk.StringVar(
             value=r"X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb"
@@ -367,6 +368,38 @@ class HerramientasWindow(tk.Toplevel):
         self.log_text.pack(side="left", fill="both", expand=True)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.configure(command=self.log_text.yview)
+
+    def _apply_master_icon(self, master: tk.Widget) -> None:
+        """Apply the icon from the main application window to this window."""
+        if master is None:
+            return
+
+        try:
+            main_window = master.winfo_toplevel()
+        except tk.TclError:
+            return
+
+        icon_reference = getattr(main_window, "logo_icon", None)
+        if icon_reference:
+            try:
+                self.iconphoto(False, icon_reference)
+            except tk.TclError:
+                return
+            return
+
+        try:
+            current_icon = main_window.iconphoto(False)
+        except tk.TclError:
+            current_icon = None
+
+        if current_icon:
+            try:
+                if isinstance(current_icon, (tuple, list)):
+                    self.iconphoto(False, *current_icon)
+                else:
+                    self.iconphoto(False, current_icon)
+            except tk.TclError:
+                pass
 
     def _on_actualizar(self) -> None:
         mdb_path = self.path_var.get().strip()
