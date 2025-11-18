@@ -7,7 +7,7 @@ from firebase_admin import firestore
 from collections import defaultdict
 import statistics
 
-from pdf_utils import create_temp_pdf_name
+from pdf_utils import create_temp_pdf_name, open_pdf
 
 SECCIONES_UTILIZADAS = ['Datos Calibre', 'Aprovechamiento']
 
@@ -92,4 +92,5 @@ def generar_informe_comercial_desde_ui(lista_datos, nombre: str | None = None):
             elementos.append(Spacer(1, 0.5 * cm))
 
     doc.build(elementos)
+    open_pdf(filename)
     return filename
