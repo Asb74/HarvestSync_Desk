@@ -14,7 +14,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkcalendar import DateEntry
-import webbrowser
 import firebase_admin
 from firebase_admin import credentials, firestore
 import pandas as pd
@@ -29,6 +28,7 @@ import traceback
 from PIL import Image, ImageTk
 from tkinter import simpledialog
 from pathlib import Path
+from pdf_utils import create_temp_pdf_name, open_and_cleanup_pdf
 
 # === Funciones auxiliares ===
 def recurso_path(rel_path: str) -> str:
@@ -246,9 +246,11 @@ def generar_informe_seleccionado():
     uid_usuario = resultados_df[resultados_df["IdMuestra"] == id_muestra]["Usuario"].values[0]
     try:
         buffer = generar_pdf(id_muestra, cultivo, uid_usuario)
-        with open("informe.pdf", "wb") as f:
+        nombre_muestra = valores[2] if len(valores) > 2 else None
+        filename = create_temp_pdf_name(nombre_muestra)
+        with open(filename, "wb") as f:
             f.write(buffer.read())
-        webbrowser.open("informe.pdf")
+        open_and_cleanup_pdf(filename)
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
 
@@ -296,9 +298,10 @@ def generar_informe_general():
         datos.append(muestra)
     try:
         buffer = generar_pdf_general(datos)
-        with open("informe_general.pdf", "wb") as f:
+        filename = create_temp_pdf_name(None, prefix="InformeGeneral")
+        with open(filename, "wb") as f:
             f.write(buffer.read())
-        webbrowser.open("informe_general.pdf")
+        open_and_cleanup_pdf(filename)
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
 
@@ -341,8 +344,9 @@ def ejecutar_informe_comercial():
                     data["Nombre"] = data.get("Nombre", "")
                     df_filtrado.append(data)
             lista_datos = df_filtrado
-            generar_informe_comercial_desde_ui(lista_datos)
-            webbrowser.open("informe_comercial.pdf")
+            nombre_referencia = lista_datos[0].get("Nombre") if lista_datos else None
+            filename = generar_informe_comercial_desde_ui(lista_datos, nombre=nombre_referencia)
+            open_and_cleanup_pdf(filename)
             popup.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
@@ -372,9 +376,10 @@ def generar_informe_unico_por_boleta():
 
         lista_datos = df_unico.to_dict(orient="records")
         buffer = generar_pdf_general(lista_datos)
-        with open("informe_boleta_unica.pdf", "wb") as f:
+        filename = create_temp_pdf_name(None, prefix="InformeBoletaUnica")
+        with open(filename, "wb") as f:
             f.write(buffer.read())
-        webbrowser.open("informe_boleta_unica.pdf")
+        open_and_cleanup_pdf(filename)
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
 def calcular_aforo():

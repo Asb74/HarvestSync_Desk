@@ -7,6 +7,8 @@ from firebase_admin import firestore
 from collections import defaultdict
 import statistics
 
+from pdf_utils import create_temp_pdf_name
+
 SECCIONES_UTILIZADAS = ['Datos Calibre', 'Aprovechamiento']
 
 # Acceso a Firestore
@@ -20,8 +22,9 @@ def calcular_media(valores):
     valores_numericos = [v for v in valores if isinstance(v, (int, float))]
     return round(statistics.mean(valores_numericos), 2) if valores_numericos else ''
 
-def generar_informe_comercial_desde_ui(lista_datos):
-    doc = SimpleDocTemplate("informe_comercial.pdf", pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+def generar_informe_comercial_desde_ui(lista_datos, nombre: str | None = None):
+    filename = create_temp_pdf_name(nombre, prefix="InformeComercial")
+    doc = SimpleDocTemplate(filename, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
     styles = getSampleStyleSheet()
     elementos = []
 
@@ -89,3 +92,4 @@ def generar_informe_comercial_desde_ui(lista_datos):
             elementos.append(Spacer(1, 0.5 * cm))
 
     doc.build(elementos)
+    return filename
