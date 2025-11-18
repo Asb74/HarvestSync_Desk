@@ -1,4 +1,3 @@
-import io
 from datetime import datetime
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -9,6 +8,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 import firebase_admin
 from firebase_admin import credentials, firestore
 import sys, os
+
+from pdf_utils import create_temp_pdf_name, open_pdf
 
 def recurso_path(rel_path):
     try:
@@ -27,8 +28,12 @@ styles = getSampleStyleSheet()
 
 
 def generar_pdf_general(lista_datos):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
+    nombre_referencia = None
+    if lista_datos:
+        nombre_referencia = lista_datos[0].get("Nombre")
+
+    filename = create_temp_pdf_name(nombre_referencia, prefix="InformeGeneral")
+    doc = SimpleDocTemplate(filename, pagesize=landscape(A4))
     elementos = []
 
     ahora = datetime.now().strftime('%d/%m/%Y %H:%M')
@@ -151,5 +156,5 @@ def generar_pdf_general(lista_datos):
             elementos.append(Spacer(1, 12))
 
     doc.build(elementos)
-    buffer.seek(0)
-    return buffer
+    open_pdf(filename)
+    return filename

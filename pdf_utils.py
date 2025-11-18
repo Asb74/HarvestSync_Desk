@@ -5,10 +5,7 @@ import datetime
 import os
 import re
 import tempfile
-import threading
-import time
 import unicodedata
-import webbrowser
 from typing import Optional
 
 _pdf_counter = 0
@@ -39,36 +36,46 @@ def create_temp_pdf_name(nombre: Optional[str], prefix: str = "Informe") -> str:
     return os.path.join(temp_dir, filename)
 
 
-def _start_pdf_viewer(filename: str) -> None:
-    """Open *filename* with the default PDF viewer, handling fallbacks."""
+def open_pdf(filename: str) -> None:
+    """Open the PDF with the default viewer without deleting it immediately."""
     try:
-        if hasattr(os, "startfile"):
-            os.startfile(filename)  # type: ignore[attr-defined]
-        else:
-            # Fall back to the user's default handler
-            webbrowser.open_new(rf"file://{filename}")
+        os.startfile(filename)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - best effort opening
-        print(f"Error opening PDF '{filename}': {exc}")
+        print(f"Error opening PDF {filename}: {exc}")
 
 
-def open_and_cleanup_pdf(filename: str, delay: float = 2.0, max_attempts: int = 60) -> None:
-    """Open a PDF file and remove it once it's no longer locked."""
-    _start_pdf_viewer(filename)
+def cleanup_old_pdfs(max_age_hours: int = 24) -> None:
+    """Remove temporary PDFs older than *max_age_hours* from the temp folder."""
+    base_dir = os.path.join(tempfile.gettempdir(), "HarvestSyncDesk")
+    if not os.path.isdir(base_dir):
+        return
 
-    def _cleanup() -> None:
-        attempts = 0
-        while attempts < max_attempts:
-            attempts += 1
-            try:
-                os.remove(filename)
-                print(f"Temporary PDF removed: {filename}")
-                return
-            except PermissionError:
-                time.sleep(delay)
-            except FileNotFoundError:
-                return
-            except Exception as exc:  # noqa: BLE001 - log unexpected issues
-                print(f"Error deleting PDF {filename}: {exc}")
-                return
+    now = datetime.datetime.now().timestamp()
+    max_age_seconds = max_age_hours * 3600
 
-    threading.Thread(target=_cleanup, daemon=True).start()
+    for name in os.listdir(base_dir):
+        if not name.lower().endswith(".pdf"):
+            continue
+        path = os.path.join(base_dir, name)
+        try:
+            stat_info = os.stat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:  # noqa: BLE001 - log unexpected issues
+            print(f"Error stating {path}: {exc}")
+            continue
+
+        age = now - stat_info.st_mtime
+        if age <= max_age_seconds:
+            continue
+
+        try:
+            os.remove(path)
+            print(f"Removed old temp PDF: {path}")
+        except PermissionError:
+            # File still in use; skip it silently.
+            pass
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # noqa: BLE001 - log unexpected issues
+            print(f"Error removing {path}: {exc}")

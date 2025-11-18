@@ -13,6 +13,8 @@ from reportlab.lib.colors import HexColor
 import threading
 from tkinter import Toplevel, Label
 import sys, os
+
+from pdf_utils import create_temp_pdf_name, open_pdf
 def recurso_path(rel_path):
     """Devuelve la ruta absoluta a un recurso, compatible con PyInstaller"""
     try:
@@ -103,11 +105,15 @@ def generar_con_espera():
 
 
 def generar_pdf(id_muestra, cultivo, uid_usuario):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    datos_muestra = db.collection("Muestras").document(id_muestra).get().to_dict()
+    nombre_muestra = None
+    if datos_muestra:
+        nombre_muestra = datos_muestra.get("Nombre")
+
+    filename = create_temp_pdf_name(nombre_muestra)
+    doc = SimpleDocTemplate(filename, pagesize=A4)
     elementos = []
 
-    datos_muestra = db.collection("Muestras").document(id_muestra).get().to_dict()
     plantilla_datos = db.collection("PlantillasInforme").document("DATOS").get().to_dict()
     secciones = plantilla_datos.get("CAMPO", [])
 
@@ -231,8 +237,8 @@ def generar_pdf(id_muestra, cultivo, uid_usuario):
         #    elementos.append(Spacer(1, 12))
 
     doc.build(elementos)
-    buffer.seek(0)
-    return buffer
+    open_pdf(filename)
+    return filename
 
 
 # Ejemplo de uso:

@@ -28,7 +28,7 @@ import traceback
 from PIL import Image, ImageTk
 from tkinter import simpledialog
 from pathlib import Path
-from pdf_utils import create_temp_pdf_name, open_and_cleanup_pdf
+from pdf_utils import cleanup_old_pdfs
 
 # === Funciones auxiliares ===
 def recurso_path(rel_path: str) -> str:
@@ -90,6 +90,17 @@ except Exception:  # noqa: BLE001 - mantener compatibilidad con ejecuciones empa
     logo_icon = None
 
 root.logo_icon = logo_icon
+
+# Limpieza de PDFs temporales al iniciar la aplicación
+cleanup_old_pdfs(max_age_hours=24)
+
+
+def _on_close() -> None:
+    cleanup_old_pdfs(max_age_hours=24)
+    root.destroy()
+
+
+root.protocol("WM_DELETE_WINDOW", _on_close)
 # Función personalizada para askstring con icono
     
 
@@ -245,12 +256,7 @@ def generar_informe_seleccionado():
     cultivo = valores[5]
     uid_usuario = resultados_df[resultados_df["IdMuestra"] == id_muestra]["Usuario"].values[0]
     try:
-        buffer = generar_pdf(id_muestra, cultivo, uid_usuario)
-        nombre_muestra = valores[2] if len(valores) > 2 else None
-        filename = create_temp_pdf_name(nombre_muestra)
-        with open(filename, "wb") as f:
-            f.write(buffer.read())
-        open_and_cleanup_pdf(filename)
+        generar_pdf(id_muestra, cultivo, uid_usuario)
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
 
@@ -297,11 +303,7 @@ def generar_informe_general():
         muestra = resultados_df[resultados_df["IdMuestra"] == valores[0]].iloc[0].to_dict()
         datos.append(muestra)
     try:
-        buffer = generar_pdf_general(datos)
-        filename = create_temp_pdf_name(None, prefix="InformeGeneral")
-        with open(filename, "wb") as f:
-            f.write(buffer.read())
-        open_and_cleanup_pdf(filename)
+        generar_pdf_general(datos)
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
 
@@ -345,8 +347,7 @@ def ejecutar_informe_comercial():
                     df_filtrado.append(data)
             lista_datos = df_filtrado
             nombre_referencia = lista_datos[0].get("Nombre") if lista_datos else None
-            filename = generar_informe_comercial_desde_ui(lista_datos, nombre=nombre_referencia)
-            open_and_cleanup_pdf(filename)
+            generar_informe_comercial_desde_ui(lista_datos, nombre=nombre_referencia)
             popup.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
@@ -375,11 +376,7 @@ def generar_informe_unico_por_boleta():
         df_unico = df_ordenado.drop_duplicates(subset="Boleta", keep="first")
 
         lista_datos = df_unico.to_dict(orient="records")
-        buffer = generar_pdf_general(lista_datos)
-        filename = create_temp_pdf_name(None, prefix="InformeBoletaUnica")
-        with open(filename, "wb") as f:
-            f.write(buffer.read())
-        open_and_cleanup_pdf(filename)
+        generar_pdf_general(lista_datos)
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo generar el informe:\n{str(e)}")
 def calcular_aforo():
