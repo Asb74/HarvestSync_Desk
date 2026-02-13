@@ -5,6 +5,7 @@ import datetime
 import os
 import tempfile
 import threading
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -290,7 +291,14 @@ class StockCampoWindow(BaseToolWindow):
                 rows = self._ejecutar_consulta()
                 self.after(0, lambda: self._mostrar_resultados(rows))
             except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: messagebox.showerror("Stock de Campo", f"Error en el cálculo:\n{exc}"))
+                tb = traceback.format_exc()
+                self.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Stock de Campo",
+                        f"Error en el cálculo:\n\nEXCEPCIÓN: {repr(exc)}\n\nTRACEBACK COMPLETO:\n{tb}",
+                    ),
+                )
             finally:
                 self.after(0, lambda: self.btn_calcular.configure(state="normal"))
                 self.after(0, lambda: self.btn_exportar.configure(state="normal"))
@@ -299,6 +307,10 @@ class StockCampoWindow(BaseToolWindow):
 
     def _ejecutar_consulta(self) -> list[dict[str, Any]]:
         sql, params = self._construir_sql()
+        print("----- SQL GENERADA -----")
+        print(sql)
+        print(f"PARAMS: {params}")
+        print("------------------------")
         conn = self._get_connection()
         cur = conn.cursor()
         cur.execute(sql, params)
