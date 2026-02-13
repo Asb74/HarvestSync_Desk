@@ -761,11 +761,10 @@ class StockCampoWindow(BaseToolWindow):
                             self._configured_color_tags.add(tag_name)
                     restr_display = f"■ {color}" if color else ""
                     boleta = self._value_or_empty(row.get("Boleta"))
-                    detalle_text = f"{albaran} ({boleta})" if boleta else albaran
                     self.tree.insert(
                         socio_iid,
                         "end",
-                        text=detalle_text,
+                        text=albaran,
                         values=(
                             boleta,
                             self._value_or_empty(row.get("Plataforma")),
@@ -916,10 +915,9 @@ class StockCampoWindow(BaseToolWindow):
 
                 for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
                     boleta = self._value_or_empty(row.get("Boleta"))
-                    detalle_text = f"{albaran} ({boleta})" if boleta else albaran
                     table_data.append(
                         [
-                            f"      {detalle_text}",
+                            f"      {albaran}",
                             boleta,
                             self._value_or_empty(row.get("Plataforma")),
                             self._value_or_empty(row.get("Empresa")),
