@@ -205,7 +205,7 @@ class StockCampoWindow(BaseToolWindow):
                 params.append(valor)
 
         union_ids = "\n                UNION\n                ".join(
-            [f"SELECT IdPartida{i} AS Id FROM Partidas" for i in range(10)]
+            [f"(SELECT IdPartida{i} AS Id FROM Partidas)" for i in range(10)]
         )
 
         where_clause = "WHERE Volcados.Id IS NULL"
