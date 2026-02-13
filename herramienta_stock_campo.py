@@ -55,6 +55,9 @@ class StockCampoWindow(BaseToolWindow):
         self._cargar_valores_filtros()
 
     def _build_ui(self) -> None:
+        style = ttk.Style()
+        bg = self.cget("background") or style.lookup("TFrame", "background")
+
         container = ttk.Frame(self, padding=10)
         container.grid(row=0, column=0, sticky="nsew")
         self.rowconfigure(0, weight=1)
@@ -148,10 +151,11 @@ class StockCampoWindow(BaseToolWindow):
         panel_scroll = ttk.Scrollbar(frame_right, orient="vertical")
         panel_scroll.grid(row=0, column=1, sticky="ns")
 
-        panel_canvas = tk.Canvas(frame_right, highlightthickness=0, background="white")
+        panel_canvas = tk.Canvas(frame_right, highlightthickness=0, background=bg)
         panel_canvas.grid(row=0, column=0, sticky="nsew")
         panel_canvas.configure(yscrollcommand=panel_scroll.set)
         panel_scroll.configure(command=panel_canvas.yview)
+        self._enable_mousewheel(panel_canvas)
 
         panel_content = ttk.Frame(panel_canvas)
         panel_window = panel_canvas.create_window((0, 0), window=panel_content, anchor="nw")
@@ -174,11 +178,12 @@ class StockCampoWindow(BaseToolWindow):
             block.rowconfigure(0, weight=1)
             block.columnconfigure(0, weight=1)
 
-            block_canvas = tk.Canvas(block, height=110, highlightthickness=0, background="white")
+            block_canvas = tk.Canvas(block, height=110, highlightthickness=0, background=bg)
             block_canvas.grid(row=0, column=0, sticky="nsew")
             block_scroll = ttk.Scrollbar(block, orient="vertical", command=block_canvas.yview)
             block_scroll.grid(row=0, column=1, sticky="ns")
             block_canvas.configure(yscrollcommand=block_scroll.set)
+            self._enable_mousewheel(block_canvas)
 
             block_content = ttk.Frame(block_canvas)
             block_window = block_canvas.create_window((0, 0), window=block_content, anchor="nw")
@@ -211,6 +216,20 @@ class StockCampoWindow(BaseToolWindow):
             padx=(0, 6),
             pady=(8, 0),
         )
+
+    def _enable_mousewheel(self, canvas: tk.Canvas) -> None:
+        def _on_mousewheel(event: tk.Event, target_canvas: tk.Canvas = canvas) -> None:
+            if event.delta:
+                target_canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        def _bind_wheel(_: tk.Event, target_canvas: tk.Canvas = canvas) -> None:
+            target_canvas.bind("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_wheel(_: tk.Event, target_canvas: tk.Canvas = canvas) -> None:
+            target_canvas.unbind("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
 
     def _get_connection(self) -> pyodbc.Connection:
         conn_str = (
