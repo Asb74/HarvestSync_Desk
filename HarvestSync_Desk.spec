@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('HarvestSync.json', '.'), ('COOPERATIVA.png', '.')]
+binaries = []
+hiddenimports = ['pyodbc']
+tmp_ret = collect_all('pyodbc')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['HarvestSync_Desk.py'],
     pathex=[],
-    binaries=[],
-    datas=[('HarvestSync.json', '.')],
-    hiddenimports=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

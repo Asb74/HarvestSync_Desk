@@ -24,3 +24,12 @@ output/
 *.exe
 *.zip
 *.msi
+Nueva carpeta/Backup/
+Nueva carpeta/output/
+output/
+dist/
+build/
+*.exe
+*.zip
+*.msi
+*.json

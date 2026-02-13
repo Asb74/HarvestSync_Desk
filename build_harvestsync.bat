@@ -34,7 +34,7 @@ python -m pip install --upgrade pip
 if exist requirements.txt (
   pip install -r requirements.txt
 ) else (
-  pip install reportlab pillow tkcalendar pandas firebase_admin google-cloud-firestore pyinstaller
+  pip install reportlab pillow tkcalendar pandas firebase_admin google-cloud-firestore pyinstaller pyodbc
 )
 if errorlevel 1 goto :err3
 
@@ -46,13 +46,16 @@ if not exist "%MAIN_PY%" goto :err_missing_main
 if not exist "%JSON_FILE%" goto :err_missing_json
 
 if exist "%ICON_FILE%" (
-  set "ICON_PARAM=-i \"%ICON_FILE%\""
+  set "ICON_PARAM=-i %ICON_FILE%"
 ) else (
   set "ICON_PARAM="
   echo [WARN] No se encontro %ICON_FILE%. Se compila sin icono.
 )
 
-pyinstaller -F -w -n "%APP_NAME%" %ICON_PARAM% --add-data "%JSON_FILE%;." "%MAIN_PY%"
+REM === Incluir pyodbc en el build ===
+set "PYI_EXTRA=--hidden-import pyodbc --collect-binaries pyodbc"
+
+pyinstaller -F -w -n "%APP_NAME%" %ICON_PARAM% %PYI_EXTRA% --add-data "%JSON_FILE%;." "%MAIN_PY%"
 if errorlevel 1 goto :err_pyinstaller
 
 echo.
