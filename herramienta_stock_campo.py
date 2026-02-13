@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import datetime
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import traceback
@@ -17,7 +19,7 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Table, TableStyle
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 from ui_utils import BaseToolWindow
 
@@ -39,20 +41,17 @@ class StockCampoWindow(BaseToolWindow):
         self.title("Stock de Campo")
         self.geometry("1200x650")
 
-        self.empresa_var = tk.StringVar()
-        self.plataforma_var = tk.StringVar()
-        self.cultivo_var = tk.StringVar()
-        self.variedad_var = tk.StringVar()
-        self.restricciones_var = tk.StringVar()
         self.total_general_var = tk.StringVar(value="TOTAL GENERAL: 0 kg")
         self.actualizacion_var = tk.StringVar(value="Última actualización: No disponible")
 
         self._rows: list[dict[str, Any]] = []
+        self._raw_rows: list[dict[str, Any]] = []
         self._temp_logo_path: str | None = None
+        self._syncing_filters = False
 
         self._build_ui()
         self._actualizar_label_actualizacion()
-        self._cargar_valores_filtros()
+        self._lanzar_calculo(disable_buttons=False)
 
     def _build_ui(self) -> None:
         style = ttk.Style()
@@ -69,33 +68,16 @@ class StockCampoWindow(BaseToolWindow):
         frame_filtros = ttk.LabelFrame(container, text="Filtros", padding=10)
         frame_filtros.grid(row=0, column=0, sticky="ew", pady=(0, 10))
 
-        ttk.Label(frame_filtros, text="Empresa").grid(row=0, column=0, padx=6, pady=(0, 4), sticky="w")
-        self.cmb_empresa = ttk.Combobox(frame_filtros, textvariable=self.empresa_var, state="readonly", width=18)
-        self.cmb_empresa.grid(row=1, column=0, padx=6, pady=(0, 6), sticky="ew")
-
-        ttk.Label(frame_filtros, text="Plataforma").grid(row=0, column=1, padx=6, pady=(0, 4), sticky="w")
-        self.cmb_plataforma = ttk.Combobox(frame_filtros, textvariable=self.plataforma_var, state="readonly", width=18)
-        self.cmb_plataforma.grid(row=1, column=1, padx=6, pady=(0, 6), sticky="ew")
-
-        ttk.Label(frame_filtros, text="Cultivo").grid(row=0, column=2, padx=6, pady=(0, 4), sticky="w")
-        self.cmb_cultivo = ttk.Combobox(frame_filtros, textvariable=self.cultivo_var, state="readonly", width=18)
-        self.cmb_cultivo.grid(row=1, column=2, padx=6, pady=(0, 6), sticky="ew")
-
-        ttk.Label(frame_filtros, text="Variedad").grid(row=0, column=3, padx=6, pady=(0, 4), sticky="w")
-        self.cmb_variedad = ttk.Combobox(frame_filtros, textvariable=self.variedad_var, state="readonly", width=18)
-        self.cmb_variedad.grid(row=1, column=3, padx=6, pady=(0, 6), sticky="ew")
-
-        ttk.Label(frame_filtros, text="Restricciones").grid(row=0, column=4, padx=6, pady=(0, 4), sticky="w")
-        self.cmb_restricciones = ttk.Combobox(frame_filtros, textvariable=self.restricciones_var, state="readonly", width=18)
-        self.cmb_restricciones.grid(row=1, column=4, padx=6, pady=(0, 6), sticky="ew")
-
         self.btn_calcular = ttk.Button(frame_filtros, text="🔍 Calcular", command=self._lanzar_calculo)
-        self.btn_calcular.grid(row=1, column=5, padx=6, pady=(0, 6), sticky="e")
+        self.btn_calcular.grid(row=0, column=0, padx=6, pady=(0, 6), sticky="e")
 
-        self.btn_exportar = ttk.Button(frame_filtros, text="🧾 Exportar PDF", command=self._exportar_pdf)
-        self.btn_exportar.grid(row=1, column=6, padx=6, pady=(0, 6), sticky="e")
+        self.btn_reset_filtros = ttk.Button(frame_filtros, text="♻ Reiniciar filtros", command=self._reiniciar_filtros)
+        self.btn_reset_filtros.grid(row=0, column=1, padx=6, pady=(0, 6), sticky="e")
 
-        for col in range(5):
+        self.btn_exportar = ttk.Button(frame_filtros, text="👁 Ver PDF", command=self._exportar_pdf)
+        self.btn_exportar.grid(row=0, column=2, padx=6, pady=(0, 6), sticky="e")
+
+        for col in range(3):
             frame_filtros.columnconfigure(col, weight=1)
 
         frame_dashboard = ttk.Frame(container)
@@ -238,59 +220,8 @@ class StockCampoWindow(BaseToolWindow):
         )
         return pyodbc.connect(conn_str, timeout=60)
 
-    def _cargar_valores_filtros(self) -> None:
-        def worker() -> None:
-            query_map = {
-                "empresa": "SELECT DISTINCT EMPRESA FROM PesosFres WHERE EMPRESA IS NOT NULL ORDER BY EMPRESA",
-                "plataforma": "SELECT DISTINCT Plataforma FROM PesosFres WHERE Plataforma IS NOT NULL ORDER BY Plataforma",
-                "cultivo": "SELECT DISTINCT CULTIVO FROM PesosFres WHERE CULTIVO IS NOT NULL ORDER BY CULTIVO",
-                "variedad": "SELECT DISTINCT Variedad FROM PesosFres WHERE Variedad IS NOT NULL ORDER BY Variedad",
-                "restricciones": "SELECT DISTINCT Restricciones FROM PesosFres WHERE Restricciones IS NOT NULL ORDER BY Restricciones",
-            }
-            values: dict[str, list[str]] = {k: [""] for k in query_map}
-            try:
-                conn = self._get_connection()
-                cur = conn.cursor()
-                for key, sql in query_map.items():
-                    cur.execute(sql)
-                    values[key].extend(str(row[0]).strip() for row in cur.fetchall() if row[0] not in (None, ""))
-                conn.close()
-            except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: messagebox.showerror("Stock de Campo", f"Error cargando filtros:\n{exc}"))
-                return
-
-            def apply_values() -> None:
-                self.cmb_empresa["values"] = values["empresa"]
-                self.cmb_plataforma["values"] = values["plataforma"]
-                self.cmb_cultivo["values"] = values["cultivo"]
-                self.cmb_variedad["values"] = values["variedad"]
-                self.cmb_restricciones["values"] = values["restricciones"]
-                self.cmb_empresa.current(0)
-                self.cmb_plataforma.current(0)
-                self.cmb_cultivo.current(0)
-                self.cmb_variedad.current(0)
-                self.cmb_restricciones.current(0)
-
-            self.after(0, apply_values)
-
-        threading.Thread(target=worker, daemon=True).start()
-
     def _construir_sql(self) -> tuple[str, list[Any]]:
-        filtros_sql: list[str] = []
         params: list[Any] = []
-
-        filtros = [
-            ("p.EMPRESA", self.empresa_var.get().strip()),
-            ("p.Plataforma", self.plataforma_var.get().strip()),
-            ("p.CULTIVO", self.cultivo_var.get().strip()),
-            ("p.Variedad", self.variedad_var.get().strip()),
-            ("p.Restricciones", self.restricciones_var.get().strip()),
-        ]
-
-        for campo, valor in filtros:
-            if valor:
-                filtros_sql.append(f"{campo} = ?")
-                params.append(valor)
 
         where_clause = """
             WHERE
@@ -312,22 +243,19 @@ class StockCampoWindow(BaseToolWindow):
                         OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida9 & '',50)
                 )
         """
-        if filtros_sql:
-            where_clause += "\n            AND " + "\n            AND ".join(filtros_sql)
-
         sql = f"""
             SELECT
                 p.AlbaranDef,
-                p.Socio,
+                IIf(IsNull(p.Socio),'',p.Socio) AS Socio,
                 p.Fcarga,
-                p.Variedad,
-                p.Plataforma,
-                p.EMPRESA,
-                p.CULTIVO,
+                IIf(IsNull(p.Variedad),'',p.Variedad) AS Variedad,
+                IIf(IsNull(p.Plataforma),'',p.Plataforma) AS Plataforma,
+                IIf(IsNull(p.EMPRESA),'',p.EMPRESA) AS EMPRESA,
+                IIf(IsNull(p.CULTIVO),'',p.CULTIVO) AS CULTIVO,
                 p.Neto,
                 p.NetoPartida,
-                p.Restricciones,
-                LEFT(m.Valor & '',50) AS Color
+                IIf(IsNull(p.Restricciones),'',p.Restricciones) AS Restricciones,
+                IIf(IsNull(LEFT(m.Valor & '',50)),'',LEFT(m.Valor & '',50)) AS Color
             FROM PesosFres AS p
             LEFT JOIN MRestricciones AS m
                 ON LEFT(m.IdRestricciones & '',50) = LEFT(p.Restricciones & '',50)
@@ -357,9 +285,11 @@ class StockCampoWindow(BaseToolWindow):
     def _actualizar_label_actualizacion(self) -> None:
         self.actualizacion_var.set(f"Última actualización: {self._obtener_ultima_actualizacion()}")
 
-    def _lanzar_calculo(self) -> None:
-        self.btn_calcular.configure(state="disabled")
-        self.btn_exportar.configure(state="disabled")
+    def _lanzar_calculo(self, disable_buttons: bool = True) -> None:
+        if disable_buttons:
+            self.btn_calcular.configure(state="disabled")
+            self.btn_exportar.configure(state="disabled")
+            self.btn_reset_filtros.configure(state="disabled")
 
         def worker() -> None:
             try:
@@ -375,8 +305,10 @@ class StockCampoWindow(BaseToolWindow):
                     ),
                 )
             finally:
-                self.after(0, lambda: self.btn_calcular.configure(state="normal"))
-                self.after(0, lambda: self.btn_exportar.configure(state="normal"))
+                if disable_buttons:
+                    self.after(0, lambda: self.btn_calcular.configure(state="normal"))
+                    self.after(0, lambda: self.btn_exportar.configure(state="normal"))
+                    self.after(0, lambda: self.btn_reset_filtros.configure(state="normal"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -394,11 +326,18 @@ class StockCampoWindow(BaseToolWindow):
             neto_partida = 0.0 if row.NetoPartida is None else float(row.NetoPartida)
             neto = 0.0 if row.Neto is None else float(row.Neto)
             kilos = neto_partida if neto_partida != 0 else neto
+            fcarga = row.Fcarga
+            if isinstance(fcarga, datetime.datetime):
+                fcarga_fmt = fcarga.strftime("%d/%m/%Y")
+            elif isinstance(fcarga, datetime.date):
+                fcarga_fmt = datetime.datetime.combine(fcarga, datetime.time.min).strftime("%d/%m/%Y")
+            else:
+                fcarga_fmt = "" if fcarga is None else str(fcarga)
             data.append(
                 {
                     "AlbaranDef": "" if row.AlbaranDef is None else str(row.AlbaranDef),
                     "Socio": "" if row.Socio is None else str(row.Socio),
-                    "Fcarga": "" if row.Fcarga is None else str(row.Fcarga),
+                    "Fcarga": fcarga_fmt,
                     "Plataforma": "" if row.Plataforma is None else str(row.Plataforma),
                     "Empresa": "" if row.EMPRESA is None else str(row.EMPRESA),
                     "Cultivo": "" if row.CULTIVO is None else str(row.CULTIVO),
@@ -429,25 +368,52 @@ class StockCampoWindow(BaseToolWindow):
             "Plataforma": "Plataforma",
         }
         for section, field in config.items():
-            block = self.side_filter_blocks.get(section)
-            if not block:
-                continue
-            for check in block["checkbuttons"]:
-                check.destroy()
-            block["variables"] = []
-            block["checkbuttons"] = []
             unique_values = sorted({self._value_or_empty(row.get(field)) for row in rows})
-            for value in unique_values:
-                var = tk.BooleanVar(value=True)
-                check = ttk.Checkbutton(
-                    block["content"],
-                    text=value or "(Vacío)",
-                    variable=var,
-                    command=self._apply_side_filters,
-                )
-                check.pack(fill="x", anchor="w")
-                block["variables"].append((value, var))
-                block["checkbuttons"].append(check)
+            self._render_side_filter_block(section, unique_values, set())
+
+    def _render_side_filter_block(self, section: str, values: list[str], selected_values: set[str]) -> None:
+        block = self.side_filter_blocks.get(section)
+        if not block:
+            return
+        for check in block.get("checkbuttons", []):
+            check.destroy()
+        block["variables"] = []
+        block["checkbuttons"] = []
+        block["all_values"] = list(values)
+
+        select_all_var = tk.BooleanVar(value=False)
+
+        def on_select_all_change() -> None:
+            if self._syncing_filters:
+                return
+            should_select = select_all_var.get()
+            self._syncing_filters = True
+            for _, item_var in block["variables"]:
+                item_var.set(should_select)
+            self._syncing_filters = False
+            self._apply_side_filters()
+
+        select_all_check = ttk.Checkbutton(
+            block["content"],
+            text="Seleccionar todos",
+            variable=select_all_var,
+            command=on_select_all_change,
+        )
+        select_all_check.pack(fill="x", anchor="w")
+        block["select_all_var"] = select_all_var
+        block["checkbuttons"].append(select_all_check)
+
+        for value in values:
+            var = tk.BooleanVar(value=value in selected_values)
+            check = ttk.Checkbutton(
+                block["content"],
+                text=value or "(Vacío)",
+                variable=var,
+                command=self._apply_side_filters,
+            )
+            check.pack(fill="x", anchor="w")
+            block["variables"].append((value, var))
+            block["checkbuttons"].append(check)
 
     def _value_or_empty(self, value: Any) -> str:
         return "" if value is None else str(value).strip()
@@ -456,46 +422,49 @@ class StockCampoWindow(BaseToolWindow):
         block = self.side_filter_blocks.get(section, {})
         variables = block.get("variables", [])
         selected = {val for val, var in variables if var.get()}
-        return selected
+        if selected:
+            return selected
+        return set(block.get("all_values", []))
 
     def _apply_side_filters(self) -> None:
+        if self._syncing_filters:
+            return
         raw_rows = getattr(self, "_raw_rows", [])
-        selected_fcarga = self._get_selected_values("F. Carga")
-        selected_socio = self._get_selected_values("Socio")
-        selected_variedad = self._get_selected_values("Variedad")
-        selected_color = self._get_selected_values("Color")
-        selected_plataforma = self._get_selected_values("Plataforma")
+        filter_config = {
+            "F. Carga": "Fcarga",
+            "Socio": "Socio",
+            "Variedad": "Variedad",
+            "Color": "Color",
+            "Plataforma": "Plataforma",
+        }
+
+        selected_by_section = {section: self._get_selected_values(section) for section in filter_config}
         filtered_rows: list[dict[str, Any]] = []
         for row in raw_rows:
-            if self._value_or_empty(row.get("Fcarga")) not in selected_fcarga:
-                continue
-            if self._value_or_empty(row.get("Socio")) not in selected_socio:
-                continue
-            if self._value_or_empty(row.get("Variedad")) not in selected_variedad:
-                continue
-            if self._value_or_empty(row.get("Color")) not in selected_color:
-                continue
-            if self._value_or_empty(row.get("Plataforma")) not in selected_plataforma:
-                continue
-            filtered_rows.append(row)
+            include = True
+            for section, field in filter_config.items():
+                if self._value_or_empty(row.get(field)) not in selected_by_section[section]:
+                    include = False
+                    break
+            if include:
+                filtered_rows.append(row)
         self._rows = filtered_rows
+
+        available_values = {
+            section: sorted({self._value_or_empty(row.get(field)) for row in filtered_rows})
+            for section, field in filter_config.items()
+        }
+
+        for section in filter_config:
+            current_selected = {val for val, var in self.side_filter_blocks.get(section, {}).get("variables", []) if var.get()}
+            kept_selected = {val for val in current_selected if val in set(available_values[section])}
+            self._render_side_filter_block(section, available_values[section], kept_selected)
+
+        self._render_tree_rows(filtered_rows)
+
+    def _render_tree_rows(self, rows: list[dict[str, Any]]) -> None:
         self.tree.delete(*self.tree.get_children())
-        estructura: dict[str, dict[str, Any]] = {}
-        total_general = 0.0
-        for row in filtered_rows:
-            variedad = self._value_or_empty(row.get("Variedad")) or "(Sin variedad)"
-            socio = self._value_or_empty(row.get("Socio")) or "(Sin socio)"
-            albaran = self._value_or_empty(row.get("AlbaranDef")) or "(Sin albarán)"
-            kilos = float(row.get("KilosPendientes") or 0.0)
-            total_general += kilos
-            if variedad not in estructura:
-                estructura[variedad] = {"total": 0.0, "socios": {}}
-            estructura[variedad]["total"] += kilos
-            socios = estructura[variedad]["socios"]
-            if socio not in socios:
-                socios[socio] = {"total": 0.0, "items": []}
-            socios[socio]["total"] += kilos
-            socios[socio]["items"].append((albaran, row, kilos))
+        estructura, total_general = self._build_hierarchical_structure(rows)
         for variedad in sorted(estructura.keys()):
             variedad_node = estructura[variedad]
             variedad_iid = self.tree.insert(
@@ -537,8 +506,38 @@ class StockCampoWindow(BaseToolWindow):
                         ),
                         tags=(tag,) if tag else (),
                     )
-        total_fmt = f"{total_general:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        total_fmt = self._format_kilos(total_general)
         self.total_general_var.set(f"TOTAL GENERAL: {total_fmt} kg")
+
+    def _build_hierarchical_structure(self, rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], float]:
+        estructura: dict[str, dict[str, Any]] = {}
+        total_general = 0.0
+        for row in rows:
+            variedad = self._value_or_empty(row.get("Variedad")) or "(Sin variedad)"
+            socio = self._value_or_empty(row.get("Socio")) or "(Sin socio)"
+            albaran = self._value_or_empty(row.get("AlbaranDef")) or "(Sin albarán)"
+            kilos = float(row.get("KilosPendientes") or 0.0)
+            total_general += kilos
+            if variedad not in estructura:
+                estructura[variedad] = {"total": 0.0, "socios": {}}
+            estructura[variedad]["total"] += kilos
+            socios = estructura[variedad]["socios"]
+            if socio not in socios:
+                socios[socio] = {"total": 0.0, "items": []}
+            socios[socio]["total"] += kilos
+            socios[socio]["items"].append((albaran, row, kilos))
+        return estructura, total_general
+
+    def _reiniciar_filtros(self) -> None:
+        self._syncing_filters = True
+        for block in self.side_filter_blocks.values():
+            for _, var in block.get("variables", []):
+                var.set(False)
+            select_all_var = block.get("select_all_var")
+            if select_all_var is not None:
+                select_all_var.set(False)
+        self._syncing_filters = False
+        self._apply_side_filters()
 
     def _format_kilos(self, kilos: float) -> str:
         return f"{kilos:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -568,23 +567,25 @@ class StockCampoWindow(BaseToolWindow):
 
     def _exportar_pdf(self) -> None:
         if not self._rows:
-            messagebox.showwarning("Stock de Campo", "No hay resultados para exportar.")
+            messagebox.showwarning("Stock de Campo", "No hay resultados para visualizar en PDF.")
             return
 
-        filename = filedialog.asksaveasfilename(
-            title="Guardar PDF",
-            defaultextension=".pdf",
-            filetypes=[("PDF", "*.pdf")],
-            initialfile=f"stock_campo_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        temp_pdf = tempfile.NamedTemporaryFile(
+            suffix=f"_stock_campo_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            delete=False,
         )
-        if not filename:
-            return
+        temp_pdf.close()
 
         try:
-            self._crear_pdf(filename)
-            messagebox.showinfo("Stock de Campo", "PDF exportado correctamente.")
+            self._crear_pdf(temp_pdf.name)
+            if hasattr(os, "startfile"):
+                os.startfile(temp_pdf.name)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", temp_pdf.name])
+            else:
+                subprocess.Popen(["xdg-open", temp_pdf.name])
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Stock de Campo", f"Error exportando PDF:\n{exc}")
+            messagebox.showerror("Stock de Campo", f"Error generando PDF:\n{exc}")
         finally:
             if self._temp_logo_path and os.path.exists(self._temp_logo_path):
                 try:
@@ -615,32 +616,56 @@ class StockCampoWindow(BaseToolWindow):
         c.setFont("Helvetica", 10)
         c.drawRightString(width - 1.5 * cm, height - 1.7 * cm, datetime.datetime.now().strftime("%d/%m/%Y %H:%M"))
 
-        header = [
-            "Plataforma",
-            "Empresa",
-            "Cultivo",
-            "Variedad",
-            "Restricciones",
-            "KilosPendientes",
-        ]
+        header = ["Detalle", "Plataforma", "Empresa", "Cultivo", "Restricciones", "KilosPendientes"]
         table_data = [header]
-        total_general = 0.0
-        for row in self._rows:
-            total_general += row["KilosPendientes"]
+        row_styles: list[tuple[int, str | None]] = []
+        estructura, total_general = self._build_hierarchical_structure(self._rows)
+
+        for variedad in sorted(estructura.keys()):
+            variedad_node = estructura[variedad]
             table_data.append(
                 [
-                    row["Plataforma"],
-                    row["Empresa"],
-                    row["Cultivo"],
-                    row["Variedad"],
-                    row["Restricciones"],
-                    f"{row['KilosPendientes']:.2f}",
+                    f"VARIEDAD: {variedad}",
+                    "",
+                    "",
+                    "",
+                    "",
+                    self._format_kilos(variedad_node["total"]),
                 ]
             )
+            row_styles.append((len(table_data) - 1, "variedad"))
+
+            for socio in sorted(variedad_node["socios"].keys()):
+                socio_node = variedad_node["socios"][socio]
+                table_data.append(
+                    [
+                        f"   SOCIO: {socio}",
+                        "",
+                        "",
+                        "",
+                        "",
+                        self._format_kilos(socio_node["total"]),
+                    ]
+                )
+                row_styles.append((len(table_data) - 1, "socio"))
+
+                for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
+                    table_data.append(
+                        [
+                            f"      {albaran}",
+                            self._value_or_empty(row.get("Plataforma")),
+                            self._value_or_empty(row.get("Empresa")),
+                            self._value_or_empty(row.get("Cultivo")),
+                            self._value_or_empty(row.get("Restricciones")),
+                            self._format_kilos(kilos),
+                        ]
+                    )
+                    restr = self._value_or_empty(row.get("Restricciones")).upper()
+                    row_styles.append((len(table_data) - 1, restr))
 
         table = Table(
             table_data,
-            colWidths=[4.2 * cm, 3.6 * cm, 3.6 * cm, 5.1 * cm, 5.1 * cm, 3.5 * cm],
+            colWidths=[8.1 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm, 6.5 * cm, 3.2 * cm],
             repeatRows=1,
         )
         style = TableStyle(
@@ -656,21 +681,28 @@ class StockCampoWindow(BaseToolWindow):
             ]
         )
 
-        for idx, row in enumerate(self._rows, start=1):
-            restr = row["Restricciones"].upper().strip()
-            if "ROJO" in restr:
-                style.add("BACKGROUND", (0, idx), (-1, idx), colors.HexColor(self.COLOR_MAP["ROJO"]))
-            elif "AMARILLO" in restr:
-                style.add("BACKGROUND", (0, idx), (-1, idx), colors.HexColor(self.COLOR_MAP["AMARILLO"]))
-            elif "VERDE" in restr:
-                style.add("BACKGROUND", (0, idx), (-1, idx), colors.HexColor(self.COLOR_MAP["VERDE"]))
+        for row_idx, row_type in row_styles:
+            if row_type == "variedad":
+                style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor("#595959"))
+                style.add("TEXTCOLOR", (0, row_idx), (-1, row_idx), colors.white)
+                style.add("FONTNAME", (0, row_idx), (-1, row_idx), "Helvetica-Bold")
+            elif row_type == "socio":
+                style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor("#d9d9d9"))
+                style.add("FONTNAME", (0, row_idx), (-1, row_idx), "Helvetica-Bold")
+            else:
+                if "ROJO" in row_type:
+                    style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP["ROJO"]))
+                elif "AMARILLO" in row_type:
+                    style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP["AMARILLO"]))
+                elif "VERDE" in row_type:
+                    style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP["VERDE"]))
 
         table.setStyle(style)
         table.wrapOn(c, width - 3 * cm, height - 7.8 * cm)
         table.drawOn(c, 1.3 * cm, 2.7 * cm)
 
         c.setFont("Helvetica-Bold", 11)
-        c.drawRightString(width - 1.5 * cm, 1.6 * cm, f"TOTAL GENERAL: {total_general:.2f} kg")
+        c.drawRightString(width - 1.5 * cm, 1.6 * cm, f"TOTAL GENERAL: {self._format_kilos(total_general)} kg")
         c.save()
 
 
