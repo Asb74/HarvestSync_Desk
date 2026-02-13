@@ -34,6 +34,7 @@ class StockCampoWindow(BaseToolWindow):
         "ROJO": "#ffd6d6",
         "AMARILLO": "#fff7bf",
         "VERDE": "#d8f5d0",
+        "GRIS": "#d9d9d9",
     }
     FILTER_CONFIG = {
         "Cultivo": "Cultivo",
@@ -125,12 +126,15 @@ class StockCampoWindow(BaseToolWindow):
         for col in columns:
             anchor = "e" if col == "KilosPendientes" else "w"
             width = 170 if col != "KilosPendientes" else 150
-            self.tree.heading(col, text=col)
+            heading_text = "Neto" if col == "KilosPendientes" else col
+            self.tree.heading(col, text=heading_text)
             self.tree.column(col, width=width, anchor=anchor)
 
-        self.tree.tag_configure("ROJO", background=self.COLOR_MAP["ROJO"])
-        self.tree.tag_configure("AMARILLO", background=self.COLOR_MAP["AMARILLO"])
-        self.tree.tag_configure("VERDE", background=self.COLOR_MAP["VERDE"])
+        self._configured_color_tags: set[str] = set()
+        for color_name, color_hex in self.COLOR_MAP.items():
+            tag_name = f"COLOR_{color_name.upper()}"
+            self.tree.tag_configure(tag_name, background=color_hex)
+            self._configured_color_tags.add(tag_name)
 
         scroll_y = ttk.Scrollbar(frame_tabla, orient="vertical", command=self.tree.yview)
         scroll_x = ttk.Scrollbar(frame_tabla, orient="horizontal", command=self.tree.xview)
@@ -455,7 +459,20 @@ class StockCampoWindow(BaseToolWindow):
             return
 
         todo_key = "__TODO__"
-        max_cols = self._calculate_segmentador_max_cols(section)
+        values_with_todo = [todo_key, *values]
+
+        content = block["content"]
+        content_width = content.winfo_width()
+        if content_width <= 1:
+            content_width = block["container"].winfo_width()
+        if content_width <= 1:
+            content_width = 800
+
+        min_button_width_px = 120
+        horizontal_gap = 8
+        max_cols = max(1, content_width // (min_button_width_px + horizontal_gap))
+        max_cols = min(max_cols, len(values_with_todo))
+
         same_values = set(values) == set(block["all_values"])
         same_layout = block.get("last_max_cols") == max_cols
         if same_values and same_layout:
@@ -464,15 +481,22 @@ class StockCampoWindow(BaseToolWindow):
 
         for button in block["buttons"].values():
             button.destroy()
+
+        existing_cols = max(content.grid_size()[0], max_cols)
+        for col in range(existing_cols):
+            content.columnconfigure(col, weight=0, uniform="")
+
+        for col in range(max_cols):
+            content.columnconfigure(col, weight=1, uniform=f"segment_{section}")
+
         block["buttons"] = {}
         block["all_values"] = list(values)
         block["last_max_cols"] = max_cols
 
-        values_with_todo = [todo_key, *values]
         for idx, value in enumerate(values_with_todo):
             button_text = "(Todo)" if value == todo_key else (value or "(Vacío)")
             button = tk.Button(
-                block["content"],
+                content,
                 text=button_text,
                 relief="raised",
                 bd=1,
@@ -485,7 +509,7 @@ class StockCampoWindow(BaseToolWindow):
             )
             row = idx // max_cols
             col = idx % max_cols
-            button.grid(row=row, column=col, padx=(0, 6), pady=(0, 2), sticky="w")
+            button.grid(row=row, column=col, padx=4, pady=(0, 4), sticky="ew")
             block["buttons"][value] = button
 
         self._update_segmentador_visual(section)
@@ -675,14 +699,14 @@ class StockCampoWindow(BaseToolWindow):
                     open=True,
                 )
                 for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
-                    restr = self._value_or_empty(row.get("Restricciones")).upper()
-                    tag = ""
-                    if "ROJO" in restr:
-                        tag = "ROJO"
-                    elif "AMARILLO" in restr:
-                        tag = "AMARILLO"
-                    elif "VERDE" in restr:
-                        tag = "VERDE"
+                    color = self._value_or_empty(row.get("Color")).upper()
+                    tag_name = ""
+                    if color:
+                        tag_name = f"COLOR_{color}"
+                        if tag_name not in self._configured_color_tags and color in self.COLOR_MAP:
+                            self.tree.tag_configure(tag_name, background=self.COLOR_MAP[color])
+                            self._configured_color_tags.add(tag_name)
+                    restr_display = f"■ {color}" if color else ""
                     self.tree.insert(
                         socio_iid,
                         "end",
@@ -692,10 +716,10 @@ class StockCampoWindow(BaseToolWindow):
                             self._value_or_empty(row.get("Empresa")),
                             self._value_or_empty(row.get("Cultivo")),
                             self._value_or_empty(row.get("Variedad")),
-                            self._value_or_empty(row.get("Restricciones")),
+                            restr_display,
                             self._format_kilos(kilos),
                         ),
-                        tags=(tag,) if tag else (),
+                        tags=(tag_name,) if tag_name else (),
                     )
         total_fmt = self._format_kilos(total_general)
         self.total_general_var.set(f"TOTAL GENERAL: {total_fmt} kg")
@@ -799,7 +823,7 @@ class StockCampoWindow(BaseToolWindow):
         )
 
         styles = getSampleStyleSheet()
-        header = ["Detalle", "Plataforma", "Empresa", "Cultivo", "Restricciones", "KilosPendientes"]
+        header = ["Detalle", "Plataforma", "Empresa", "Cultivo", "Restricciones", "Neto"]
         table_data = [header]
         row_styles: list[tuple[int, str | None]] = []
         estructura, total_general = self._build_hierarchical_structure(self._rows)
@@ -839,12 +863,12 @@ class StockCampoWindow(BaseToolWindow):
                             self._value_or_empty(row.get("Plataforma")),
                             self._value_or_empty(row.get("Empresa")),
                             self._value_or_empty(row.get("Cultivo")),
-                            self._value_or_empty(row.get("Restricciones")),
+                            (f"■ {self._value_or_empty(row.get("Color")).upper()}" if self._value_or_empty(row.get("Color")) else ""),
                             self._format_kilos(kilos),
                         ]
                     )
-                    restr = self._value_or_empty(row.get("Restricciones")).upper()
-                    row_styles.append((len(table_data) - 1, restr))
+                    color = self._value_or_empty(row.get("Color")).upper()
+                    row_styles.append((len(table_data) - 1, color))
 
         table = Table(
             table_data,
@@ -873,12 +897,8 @@ class StockCampoWindow(BaseToolWindow):
                 style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor("#d9d9d9"))
                 style.add("FONTNAME", (0, row_idx), (-1, row_idx), "Helvetica-Bold")
             else:
-                if "ROJO" in row_type:
-                    style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP["ROJO"]))
-                elif "AMARILLO" in row_type:
-                    style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP["AMARILLO"]))
-                elif "VERDE" in row_type:
-                    style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP["VERDE"]))
+                if row_type in self.COLOR_MAP:
+                    style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP[row_type]))
 
         table.setStyle(style)
 
