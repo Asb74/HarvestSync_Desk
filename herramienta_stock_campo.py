@@ -55,6 +55,7 @@ class StockCampoWindow(BaseToolWindow):
         self._raw_rows: list[dict[str, Any]] = []
         self._temp_logo_path: str | None = None
         self._syncing_filters = False
+        self._selected_values = {section: set() for section in self.FILTER_CONFIG}
 
         self._build_ui()
         self._actualizar_label_actualizacion()
@@ -369,7 +370,9 @@ class StockCampoWindow(BaseToolWindow):
     def _populate_side_filters(self, rows: list[dict[str, Any]]) -> None:
         for section, field in self.FILTER_CONFIG.items():
             unique_values = sorted({self._value_or_empty(row.get(field)) for row in rows})
-            self._render_side_filter_block(section, unique_values, set())
+            current_selection = set(self._selected_values.get(section, set()))
+            self._selected_values[section] = {value for value in current_selection if value in set(unique_values)}
+            self._render_side_filter_block(section, unique_values, self._selected_values[section])
 
     def _render_side_filter_block(self, section: str, values: list[str], selected_values: set[str]) -> None:
         block = self.side_filter_blocks.get(section)
@@ -387,6 +390,10 @@ class StockCampoWindow(BaseToolWindow):
             if self._syncing_filters:
                 return
             should_select = select_all_var.get()
+            if should_select:
+                self._selected_values[section] = set(values)
+            else:
+                self._selected_values[section] = set()
             self._syncing_filters = True
             for _, item_var in block["variables"]:
                 item_var.set(should_select)
@@ -396,6 +403,8 @@ class StockCampoWindow(BaseToolWindow):
         def on_item_change() -> None:
             if self._syncing_filters:
                 return
+            selected = {v for v, var in block["variables"] if var.get()}
+            self._selected_values[section] = selected
             all_marked = bool(block["variables"]) and all(var.get() for _, var in block["variables"])
             self._syncing_filters = True
             select_all_var.set(all_marked)
@@ -432,12 +441,7 @@ class StockCampoWindow(BaseToolWindow):
         return "" if value is None else str(value).strip()
 
     def _get_selected_values(self, section: str) -> set[str]:
-        block = self.side_filter_blocks.get(section, {})
-        variables = block.get("variables", [])
-        selected = {val for val, var in variables if var.get()}
-        if selected:
-            return selected
-        return set(block.get("all_values", []))
+        return self._selected_values.get(section, set())
 
     def _filter_rows_by_selection(
         self,
@@ -463,22 +467,19 @@ class StockCampoWindow(BaseToolWindow):
     def _apply_side_filters(self) -> None:
         if self._syncing_filters:
             return
-        raw_rows = getattr(self, "_raw_rows", [])
+        raw_rows = self._raw_rows
 
-        current_checked = {
-            section: {val for val, var in self.side_filter_blocks.get(section, {}).get("variables", []) if var.get()}
-            for section in self.FILTER_CONFIG
-        }
-        selected_by_section = {section: self._get_selected_values(section) for section in self.FILTER_CONFIG}
-
+        selected_by_section = {}
+        for section in self.FILTER_CONFIG:
+            selected = self._selected_values.get(section, set())
+            if not selected:
+                selected_by_section[section] = {
+                    self._value_or_empty(r.get(self.FILTER_CONFIG[section]))
+                    for r in raw_rows
+                }
+            else:
+                selected_by_section[section] = selected
         self._rows = self._filter_rows_by_selection(raw_rows, selected_by_section)
-
-        for section, field in self.FILTER_CONFIG.items():
-            rows_for_section = self._filter_rows_by_selection(raw_rows, selected_by_section, ignored_section=section)
-            available_values = sorted({self._value_or_empty(row.get(field)) for row in rows_for_section})
-            kept_selected = {val for val in current_checked.get(section, set()) if val in set(available_values)}
-            self._render_side_filter_block(section, available_values, kept_selected)
-
         self._render_tree_rows(self._rows)
 
     def _render_tree_rows(self, rows: list[dict[str, Any]]) -> None:
@@ -550,6 +551,7 @@ class StockCampoWindow(BaseToolWindow):
     def _reiniciar_filtros(self) -> None:
         self._syncing_filters = True
         for section, field in self.FILTER_CONFIG.items():
+            self._selected_values[section] = set()
             for _, var in self.side_filter_blocks.get(section, {}).get("variables", []):
                 var.set(False)
             full_values = sorted({self._value_or_empty(row.get(field)) for row in self._raw_rows})
