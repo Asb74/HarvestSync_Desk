@@ -43,6 +43,7 @@ class StockCampoWindow(BaseToolWindow):
         "Socio": "Socio",
         "Variedad": "Variedad",
         "Color": "Color",
+        "Boleta": "Boleta",
         "Plataforma": "Plataforma",
     }
     SEGMENTADOR_SECTIONS = ("Cultivo", "Empresa")
@@ -60,6 +61,8 @@ class StockCampoWindow(BaseToolWindow):
         self._temp_logo_path: str | None = None
         self._syncing_filters = False
         self._selected_values = {section: set() for section in self.FILTER_CONFIG}
+        self._sort_column = "#0"
+        self._sort_descending = False
 
         self._build_ui()
         self._actualizar_label_actualizacion()
@@ -127,7 +130,7 @@ class StockCampoWindow(BaseToolWindow):
             anchor = "e" if col == "KilosPendientes" else "w"
             width = 170 if col != "KilosPendientes" else 150
             heading_text = "Neto" if col == "KilosPendientes" else col
-            self.tree.heading(col, text=heading_text)
+            self.tree.heading(col, text=heading_text, command=lambda current_col=col: self._on_tree_heading_click(current_col))
             self.tree.column(col, width=width, anchor=anchor)
 
         self._configured_color_tags: set[str] = set()
@@ -171,7 +174,7 @@ class StockCampoWindow(BaseToolWindow):
         panel_content.bind("<Configure>", _sync_panel_region)
 
         self.side_filter_blocks: dict[str, dict[str, Any]] = {}
-        side_sections = ["F. Carga", "Socio", "Variedad", "Color", "Plataforma"]
+        side_sections = ["F. Carga", "Socio", "Variedad", "Color", "Boleta", "Plataforma"]
 
         for row_idx, section_name in enumerate(side_sections):
             block = ttk.LabelFrame(panel_content, text=section_name, padding=8)
@@ -440,10 +443,35 @@ class StockCampoWindow(BaseToolWindow):
     def _mostrar_resultados(self, rows: list[dict[str, Any]]) -> None:
         if self.tree["show"] != "tree headings":
             self.tree.configure(show="tree headings")
-            self.tree.heading("#0", text="Detalle")
+            self.tree.heading("#0", text="Detalle", command=lambda: self._on_tree_heading_click("#0"))
             self.tree.column("#0", width=260, anchor="w")
         self._populate_side_filters(rows)
         self._apply_side_filters()
+
+    def _on_tree_heading_click(self, column: str) -> None:
+        if self._sort_column == column:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_column = column
+            self._sort_descending = False
+        self._render_tree_rows(self._rows)
+
+    def _get_item_sort_key(self, item: tuple[str, dict[str, Any], float]) -> Any:
+        albaran, row, kilos = item
+        sort_map = {
+            "#0": self._value_or_empty(albaran),
+            "Boleta": self._value_or_empty(row.get("Boleta")),
+            "Plataforma": self._value_or_empty(row.get("Plataforma")),
+            "Empresa": self._value_or_empty(row.get("Empresa")),
+            "Cultivo": self._value_or_empty(row.get("Cultivo")),
+            "Variedad": self._value_or_empty(row.get("Variedad")),
+            "Restricciones": self._value_or_empty(row.get("Color")).upper(),
+            "KilosPendientes": float(kilos),
+        }
+        value = sort_map.get(self._sort_column, self._value_or_empty(albaran))
+        if isinstance(value, str):
+            return value.casefold()
+        return value
 
     def _populate_side_filters(self, rows: list[dict[str, Any]]) -> None:
         for section, field in self.FILTER_CONFIG.items():
@@ -682,7 +710,7 @@ class StockCampoWindow(BaseToolWindow):
     def _render_tree_rows(self, rows: list[dict[str, Any]]) -> None:
         self.tree.delete(*self.tree.get_children())
         estructura, total_general = self._build_hierarchical_structure(rows)
-        for variedad in sorted(estructura.keys()):
+        for variedad in sorted(estructura.keys(), key=lambda value: value.casefold(), reverse=self._sort_descending if self._sort_column == "Variedad" else False):
             variedad_node = estructura[variedad]
             variedad_iid = self.tree.insert(
                 "",
@@ -691,7 +719,7 @@ class StockCampoWindow(BaseToolWindow):
                 values=("", "", "", "", "", "", self._format_kilos(variedad_node["total"])),
                 open=True,
             )
-            for socio in sorted(variedad_node["socios"].keys()):
+            for socio in sorted(variedad_node["socios"].keys(), key=lambda value: value.casefold(), reverse=self._sort_descending if self._sort_column == "#0" else False):
                 socio_node = variedad_node["socios"][socio]
                 socio_iid = self.tree.insert(
                     variedad_iid,
@@ -700,7 +728,11 @@ class StockCampoWindow(BaseToolWindow):
                     values=("", "", "", "", "", "", self._format_kilos(socio_node["total"])),
                     open=True,
                 )
-                for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
+                for albaran, row, kilos in sorted(
+                    socio_node["items"],
+                    key=self._get_item_sort_key,
+                    reverse=self._sort_descending,
+                ):
                     color = self._value_or_empty(row.get("Color")).upper()
                     tag_name = ""
                     if color:
@@ -709,12 +741,14 @@ class StockCampoWindow(BaseToolWindow):
                             self.tree.tag_configure(tag_name, background=self.COLOR_MAP[color])
                             self._configured_color_tags.add(tag_name)
                     restr_display = f"■ {color}" if color else ""
+                    boleta = self._value_or_empty(row.get("Boleta"))
+                    detalle_text = f"{albaran} ({boleta})" if boleta else albaran
                     self.tree.insert(
                         socio_iid,
                         "end",
-                        text=albaran,
+                        text=detalle_text,
                         values=(
-                            self._value_or_empty(row.get("Boleta")),
+                            boleta,
                             self._value_or_empty(row.get("Plataforma")),
                             self._value_or_empty(row.get("Empresa")),
                             self._value_or_empty(row.get("Cultivo")),
@@ -862,10 +896,12 @@ class StockCampoWindow(BaseToolWindow):
                 row_styles.append((len(table_data) - 1, "socio"))
 
                 for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
+                    boleta = self._value_or_empty(row.get("Boleta"))
+                    detalle_text = f"{albaran} ({boleta})" if boleta else albaran
                     table_data.append(
                         [
-                            f"      {albaran}",
-                            self._value_or_empty(row.get("Boleta")),
+                            f"      {detalle_text}",
+                            boleta,
                             self._value_or_empty(row.get("Plataforma")),
                             self._value_or_empty(row.get("Empresa")),
                             self._value_or_empty(row.get("Cultivo")),
