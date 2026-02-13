@@ -205,26 +205,26 @@ class StockCampoWindow(BaseToolWindow):
                 params.append(valor)
 
         where_clause = """
-            WHERE p.AlbaranDef NOT IN (
-                SELECT IdPartida0 FROM Partidas WHERE IdPartida0 IS NOT NULL
+            WHERE LEFT(p.AlbaranDef,50) NOT IN (
+                SELECT LEFT(IdPartida0,50) FROM Partidas WHERE IdPartida0 IS NOT NULL
                 UNION
-                SELECT IdPartida1 FROM Partidas WHERE IdPartida1 IS NOT NULL
+                SELECT LEFT(IdPartida1,50) FROM Partidas WHERE IdPartida1 IS NOT NULL
                 UNION
-                SELECT IdPartida2 FROM Partidas WHERE IdPartida2 IS NOT NULL
+                SELECT LEFT(IdPartida2,50) FROM Partidas WHERE IdPartida2 IS NOT NULL
                 UNION
-                SELECT IdPartida3 FROM Partidas WHERE IdPartida3 IS NOT NULL
+                SELECT LEFT(IdPartida3,50) FROM Partidas WHERE IdPartida3 IS NOT NULL
                 UNION
-                SELECT IdPartida4 FROM Partidas WHERE IdPartida4 IS NOT NULL
+                SELECT LEFT(IdPartida4,50) FROM Partidas WHERE IdPartida4 IS NOT NULL
                 UNION
-                SELECT IdPartida5 FROM Partidas WHERE IdPartida5 IS NOT NULL
+                SELECT LEFT(IdPartida5,50) FROM Partidas WHERE IdPartida5 IS NOT NULL
                 UNION
-                SELECT IdPartida6 FROM Partidas WHERE IdPartida6 IS NOT NULL
+                SELECT LEFT(IdPartida6,50) FROM Partidas WHERE IdPartida6 IS NOT NULL
                 UNION
-                SELECT IdPartida7 FROM Partidas WHERE IdPartida7 IS NOT NULL
+                SELECT LEFT(IdPartida7,50) FROM Partidas WHERE IdPartida7 IS NOT NULL
                 UNION
-                SELECT IdPartida8 FROM Partidas WHERE IdPartida8 IS NOT NULL
+                SELECT LEFT(IdPartida8,50) FROM Partidas WHERE IdPartida8 IS NOT NULL
                 UNION
-                SELECT IdPartida9 FROM Partidas WHERE IdPartida9 IS NOT NULL
+                SELECT LEFT(IdPartida9,50) FROM Partidas WHERE IdPartida9 IS NOT NULL
             )
         """
         if filtros_sql:
