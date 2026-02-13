@@ -295,21 +295,21 @@ class StockCampoWindow(BaseToolWindow):
         where_clause = """
             WHERE
                 p.AlbaranDef IS NOT NULL
-                AND Trim(Nz(p.AlbaranDef,'')) <> ''
+                AND p.AlbaranDef <> ''
                 AND NOT EXISTS (
                     SELECT 1
                     FROM Partidas pr
                     WHERE
-                        LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida0,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida1,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida2,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida3,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida4,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida5,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida6,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida7,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida8,''),50)
-                        OR LEFT(Nz(p.AlbaranDef,''),50) = LEFT(Nz(pr.IdPartida9,''),50)
+                        LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida0 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida1 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida2 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida3 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida4 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida5 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida6 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida7 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida8 & '',50)
+                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida9 & '',50)
                 )
         """
         if filtros_sql:
@@ -327,11 +327,11 @@ class StockCampoWindow(BaseToolWindow):
                 p.Neto,
                 p.NetoPartida,
                 p.Restricciones,
-                LEFT(Nz(m.Valor,''),50) AS Color
+                LEFT(m.Valor & '',50) AS Color
             FROM PesosFres AS p
             LEFT JOIN MRestricciones AS m
-                ON LEFT(Nz(m.IdRestricciones,''),50) = LEFT(Nz(p.Restricciones,''),50)
-                AND LEFT(Nz(m.CULTIVO,''),50) = LEFT(Nz(p.CULTIVO,''),50)
+                ON LEFT(m.IdRestricciones & '',50) = LEFT(p.Restricciones & '',50)
+                AND LEFT(m.CULTIVO & '',50) = LEFT(p.CULTIVO & '',50)
             {where_clause}
         """
         return sql, params
