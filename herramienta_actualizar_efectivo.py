@@ -10,6 +10,8 @@ import tkinter as tk
 from tkinter import ttk
 from firebase_admin import firestore
 
+from ui_utils import BaseToolWindow
+
 
 def _to_str(value: Any) -> Optional[str]:
     if value is None:
@@ -291,15 +293,13 @@ def actualizar_efectivo_desde_access(
         conn.close()
 
 
-class ActualizarEfectivoWindow(tk.Toplevel):
+class ActualizarEfectivoWindow(BaseToolWindow):
     """Ventana para ejecutar la actualización de Efectivo Productivo."""
 
     def __init__(self, parent: tk.Widget, db_firestore: firestore.Client) -> None:
-        super().__init__(parent)
-        self.db = db_firestore
+        super().__init__(parent, db_firestore)
         self.title("Actualizar Efectivo Productivo")
         self.resizable(True, False)
-        self._apply_parent_icon(parent)
 
         self.path_var = tk.StringVar(
             value=r"X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb"
@@ -344,30 +344,6 @@ class ActualizarEfectivoWindow(tk.Toplevel):
         self.log_text.pack(side="left", fill="both", expand=True)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.configure(command=self.log_text.yview)
-
-    def _apply_parent_icon(self, parent: tk.Widget) -> None:
-        """Hereda el icono de la ventana principal si está disponible."""
-        try:
-            main_window = parent.winfo_toplevel()
-        except tk.TclError:
-            return
-
-        icon_reference = getattr(main_window, "logo_icon", None)
-        if icon_reference:
-            try:
-                self.iconphoto(False, icon_reference)
-                return
-            except tk.TclError:
-                pass
-
-        try:
-            current_icon = main_window.iconphoto(False)
-            if isinstance(current_icon, (tuple, list)):
-                self.iconphoto(False, *current_icon)
-            elif current_icon:
-                self.iconphoto(False, current_icon)
-        except tk.TclError:
-            pass
 
     def _on_actualizar(self) -> None:
         mdb_path = self.path_var.get().strip()
