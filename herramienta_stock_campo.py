@@ -220,8 +220,8 @@ class StockCampoWindow(BaseToolWindow):
                 p.Variedad,
                 p.Restricciones,
                 SUM(
-                    IIf(p.NetoPartida IS NULL OR p.NetoPartida = 0,
-                        IIf(p.Neto IS NULL, 0, p.Neto),
+                    IIf(IsNull(p.NetoPartida) OR p.NetoPartida = 0,
+                        IIf(IsNull(p.Neto), 0, p.Neto),
                         p.NetoPartida
                     )
                 ) AS KilosPendientes
