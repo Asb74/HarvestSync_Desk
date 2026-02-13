@@ -296,17 +296,20 @@ class StockCampoWindow(BaseToolWindow):
             WHERE
                 p.AlbaranDef IS NOT NULL
                 AND Trim(CStr(p.AlbaranDef)) <> ''
-                AND LEFT(CStr(p.AlbaranDef),50) NOT IN (
-                    SELECT LEFT(CStr(IdPartida0),50) FROM Partidas WHERE IdPartida0 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida1),50) FROM Partidas WHERE IdPartida1 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida2),50) FROM Partidas WHERE IdPartida2 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida3),50) FROM Partidas WHERE IdPartida3 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida4),50) FROM Partidas WHERE IdPartida4 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida5),50) FROM Partidas WHERE IdPartida5 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida6),50) FROM Partidas WHERE IdPartida6 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida7),50) FROM Partidas WHERE IdPartida7 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida8),50) FROM Partidas WHERE IdPartida8 IS NOT NULL
-                    UNION SELECT LEFT(CStr(IdPartida9),50) FROM Partidas WHERE IdPartida9 IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM Partidas pr
+                    WHERE
+                        LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida0),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida1),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida2),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida3),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida4),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida5),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida6),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida7),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida8),50)
+                        OR LEFT(CStr(p.AlbaranDef),50) = LEFT(CStr(pr.IdPartida9),50)
                 )
         """
         if filtros_sql:
@@ -324,7 +327,7 @@ class StockCampoWindow(BaseToolWindow):
                 p.Neto,
                 p.NetoPartida,
                 p.Restricciones,
-                LEFT(m.Valor,50) AS Color
+                LEFT(CStr(m.Valor),50) AS Color
             FROM PesosFres AS p
             LEFT JOIN MRestricciones AS m
                 ON LEFT(CStr(m.IdRestricciones),50) = LEFT(CStr(p.Restricciones),50)
