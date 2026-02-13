@@ -204,11 +204,29 @@ class StockCampoWindow(BaseToolWindow):
                 filtros_sql.append(f"{campo} = ?")
                 params.append(valor)
 
-        union_ids = "\n                UNION\n                ".join(
-            [f"(SELECT IdPartida{i} AS Id FROM Partidas)" for i in range(10)]
-        )
-
-        where_clause = "WHERE Volcados.Id IS NULL"
+        where_clause = """
+            WHERE p.AlbaranDef NOT IN (
+                SELECT IdPartida0 FROM Partidas
+                UNION
+                SELECT IdPartida1 FROM Partidas
+                UNION
+                SELECT IdPartida2 FROM Partidas
+                UNION
+                SELECT IdPartida3 FROM Partidas
+                UNION
+                SELECT IdPartida4 FROM Partidas
+                UNION
+                SELECT IdPartida5 FROM Partidas
+                UNION
+                SELECT IdPartida6 FROM Partidas
+                UNION
+                SELECT IdPartida7 FROM Partidas
+                UNION
+                SELECT IdPartida8 FROM Partidas
+                UNION
+                SELECT IdPartida9 FROM Partidas
+            )
+        """
         if filtros_sql:
             where_clause += "\n            AND " + "\n            AND ".join(filtros_sql)
 
@@ -226,10 +244,6 @@ class StockCampoWindow(BaseToolWindow):
                     )
                 ) AS KilosPendientes
             FROM PesosFres AS p
-            LEFT JOIN (
-                {union_ids}
-            ) AS Volcados
-                ON p.AlbaranDef = Volcados.Id
             {where_clause}
             GROUP BY
                 p.Plataforma,
