@@ -56,40 +56,35 @@ class StockCampoWindow(BaseToolWindow):
 
     def _build_ui(self) -> None:
         container = ttk.Frame(self, padding=10)
-        container.pack(fill="both", expand=True)
+        container.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
 
-        frame_filtros = ttk.LabelFrame(container, text="Filtros")
-        frame_filtros.pack(fill="x", padx=4, pady=4)
+        container.rowconfigure(1, weight=1)
+        container.columnconfigure(0, weight=1)
 
-        ttk.Label(frame_filtros, text="Empresa").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        frame_filtros = ttk.LabelFrame(container, text="Filtros", padding=10)
+        frame_filtros.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        ttk.Label(frame_filtros, text="Empresa").grid(row=0, column=0, padx=6, pady=(0, 4), sticky="w")
         self.cmb_empresa = ttk.Combobox(frame_filtros, textvariable=self.empresa_var, state="readonly", width=18)
-        self.cmb_empresa.grid(row=1, column=0, padx=6, pady=(0, 6), sticky="we")
+        self.cmb_empresa.grid(row=1, column=0, padx=6, pady=(0, 6), sticky="ew")
 
-        ttk.Label(frame_filtros, text="Plataforma").grid(row=0, column=1, padx=6, pady=6, sticky="w")
-        self.cmb_plataforma = ttk.Combobox(
-            frame_filtros,
-            textvariable=self.plataforma_var,
-            state="readonly",
-            width=18,
-        )
-        self.cmb_plataforma.grid(row=1, column=1, padx=6, pady=(0, 6), sticky="we")
+        ttk.Label(frame_filtros, text="Plataforma").grid(row=0, column=1, padx=6, pady=(0, 4), sticky="w")
+        self.cmb_plataforma = ttk.Combobox(frame_filtros, textvariable=self.plataforma_var, state="readonly", width=18)
+        self.cmb_plataforma.grid(row=1, column=1, padx=6, pady=(0, 6), sticky="ew")
 
-        ttk.Label(frame_filtros, text="Cultivo").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        ttk.Label(frame_filtros, text="Cultivo").grid(row=0, column=2, padx=6, pady=(0, 4), sticky="w")
         self.cmb_cultivo = ttk.Combobox(frame_filtros, textvariable=self.cultivo_var, state="readonly", width=18)
-        self.cmb_cultivo.grid(row=1, column=2, padx=6, pady=(0, 6), sticky="we")
+        self.cmb_cultivo.grid(row=1, column=2, padx=6, pady=(0, 6), sticky="ew")
 
-        ttk.Label(frame_filtros, text="Variedad").grid(row=0, column=3, padx=6, pady=6, sticky="w")
+        ttk.Label(frame_filtros, text="Variedad").grid(row=0, column=3, padx=6, pady=(0, 4), sticky="w")
         self.cmb_variedad = ttk.Combobox(frame_filtros, textvariable=self.variedad_var, state="readonly", width=18)
-        self.cmb_variedad.grid(row=1, column=3, padx=6, pady=(0, 6), sticky="we")
+        self.cmb_variedad.grid(row=1, column=3, padx=6, pady=(0, 6), sticky="ew")
 
-        ttk.Label(frame_filtros, text="Restricciones").grid(row=0, column=4, padx=6, pady=6, sticky="w")
-        self.cmb_restricciones = ttk.Combobox(
-            frame_filtros,
-            textvariable=self.restricciones_var,
-            state="readonly",
-            width=18,
-        )
-        self.cmb_restricciones.grid(row=1, column=4, padx=6, pady=(0, 6), sticky="we")
+        ttk.Label(frame_filtros, text="Restricciones").grid(row=0, column=4, padx=6, pady=(0, 4), sticky="w")
+        self.cmb_restricciones = ttk.Combobox(frame_filtros, textvariable=self.restricciones_var, state="readonly", width=18)
+        self.cmb_restricciones.grid(row=1, column=4, padx=6, pady=(0, 6), sticky="ew")
 
         self.btn_calcular = ttk.Button(frame_filtros, text="🔍 Calcular", command=self._lanzar_calculo)
         self.btn_calcular.grid(row=1, column=5, padx=6, pady=(0, 6), sticky="e")
@@ -100,25 +95,32 @@ class StockCampoWindow(BaseToolWindow):
         for col in range(5):
             frame_filtros.columnconfigure(col, weight=1)
 
-        frame_tabla = ttk.Frame(container)
-        frame_tabla.pack(fill="both", expand=True, padx=4, pady=4)
+        frame_dashboard = ttk.Frame(container)
+        frame_dashboard.grid(row=1, column=0, sticky="nsew")
+        frame_dashboard.rowconfigure(0, weight=1)
+        frame_dashboard.rowconfigure(1, weight=0)
+        frame_dashboard.columnconfigure(0, weight=7)
+        frame_dashboard.columnconfigure(1, weight=3)
+
+        frame_left = ttk.Frame(frame_dashboard, padding=(0, 0, 8, 0))
+        frame_left.grid(row=0, column=0, sticky="nsew")
+        frame_left.rowconfigure(1, weight=1)
+        frame_left.columnconfigure(0, weight=1)
 
         self.lbl_actualizacion = ttk.Label(
-            frame_tabla,
+            frame_left,
             textvariable=self.actualizacion_var,
             font=("Segoe UI", 10),
             anchor="e",
         )
-        self.lbl_actualizacion.grid(row=0, column=0, sticky="e", pady=(0, 4))
+        self.lbl_actualizacion.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
-        columns = (
-            "Plataforma",
-            "Empresa",
-            "Cultivo",
-            "Variedad",
-            "Restricciones",
-            "KilosPendientes",
-        )
+        frame_tabla = ttk.Frame(frame_left)
+        frame_tabla.grid(row=1, column=0, sticky="nsew")
+        frame_tabla.rowconfigure(0, weight=1)
+        frame_tabla.columnconfigure(0, weight=1)
+
+        columns = ("Plataforma", "Empresa", "Cultivo", "Variedad", "Restricciones", "KilosPendientes")
         self.tree = ttk.Treeview(frame_tabla, columns=columns, show="headings", height=18)
         for col in columns:
             anchor = "e" if col == "KilosPendientes" else "w"
@@ -134,14 +136,80 @@ class StockCampoWindow(BaseToolWindow):
         scroll_x = ttk.Scrollbar(frame_tabla, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
-        self.tree.grid(row=1, column=0, sticky="nsew")
-        scroll_y.grid(row=1, column=1, sticky="ns")
-        scroll_x.grid(row=2, column=0, sticky="ew")
-        frame_tabla.rowconfigure(1, weight=1)
-        frame_tabla.columnconfigure(0, weight=1)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
 
-        ttk.Label(container, textvariable=self.total_general_var, font=("Segoe UI", 11, "bold")).pack(
-            anchor="e", padx=8, pady=(2, 8)
+        frame_right = ttk.Frame(frame_dashboard, padding=(8, 0, 0, 0))
+        frame_right.grid(row=0, column=1, sticky="nsew")
+        frame_right.rowconfigure(0, weight=1)
+        frame_right.columnconfigure(0, weight=1)
+
+        panel_scroll = ttk.Scrollbar(frame_right, orient="vertical")
+        panel_scroll.grid(row=0, column=1, sticky="ns")
+
+        panel_canvas = tk.Canvas(frame_right, highlightthickness=0, background="white")
+        panel_canvas.grid(row=0, column=0, sticky="nsew")
+        panel_canvas.configure(yscrollcommand=panel_scroll.set)
+        panel_scroll.configure(command=panel_canvas.yview)
+
+        panel_content = ttk.Frame(panel_canvas)
+        panel_window = panel_canvas.create_window((0, 0), window=panel_content, anchor="nw")
+
+        def _sync_panel_width(event: tk.Event) -> None:
+            panel_canvas.itemconfigure(panel_window, width=event.width)
+
+        def _sync_panel_region(_: tk.Event) -> None:
+            panel_canvas.configure(scrollregion=panel_canvas.bbox("all"))
+
+        panel_canvas.bind("<Configure>", _sync_panel_width)
+        panel_content.bind("<Configure>", _sync_panel_region)
+
+        self.side_filter_blocks: dict[str, dict[str, Any]] = {}
+        side_sections = ["F. Carga", "Socio", "Variedad", "Color", "Plataforma"]
+
+        for row_idx, section_name in enumerate(side_sections):
+            block = ttk.LabelFrame(panel_content, text=section_name, padding=8)
+            block.grid(row=row_idx, column=0, sticky="nsew", pady=(0, 10))
+            block.rowconfigure(0, weight=1)
+            block.columnconfigure(0, weight=1)
+
+            block_canvas = tk.Canvas(block, height=110, highlightthickness=0, background="white")
+            block_canvas.grid(row=0, column=0, sticky="nsew")
+            block_scroll = ttk.Scrollbar(block, orient="vertical", command=block_canvas.yview)
+            block_scroll.grid(row=0, column=1, sticky="ns")
+            block_canvas.configure(yscrollcommand=block_scroll.set)
+
+            block_content = ttk.Frame(block_canvas)
+            block_window = block_canvas.create_window((0, 0), window=block_content, anchor="nw")
+
+            def _sync_block_width(event: tk.Event, canvas: tk.Canvas = block_canvas, win: int = block_window) -> None:
+                canvas.itemconfigure(win, width=event.width)
+
+            def _sync_block_region(_: tk.Event, canvas: tk.Canvas = block_canvas) -> None:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            block_canvas.bind("<Configure>", _sync_block_width)
+            block_content.bind("<Configure>", _sync_block_region)
+
+            self.side_filter_blocks[section_name] = {
+                "labelframe": block,
+                "canvas": block_canvas,
+                "content": block_content,
+                "scrollbar": block_scroll,
+                "variables": [],
+                "checkbuttons": [],
+            }
+
+        panel_content.columnconfigure(0, weight=1)
+
+        ttk.Label(frame_dashboard, textvariable=self.total_general_var, font=("Segoe UI", 11, "bold")).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="e",
+            padx=(0, 6),
+            pady=(8, 0),
         )
 
     def _get_connection(self) -> pyodbc.Connection:
