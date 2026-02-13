@@ -36,12 +36,15 @@ class StockCampoWindow(BaseToolWindow):
         "VERDE": "#d8f5d0",
     }
     FILTER_CONFIG = {
+        "Cultivo": "Cultivo",
+        "Empresa": "Empresa",
         "F. Carga": "Fcarga",
         "Socio": "Socio",
         "Variedad": "Variedad",
         "Color": "Color",
         "Plataforma": "Plataforma",
     }
+    SEGMENTADOR_SECTIONS = ("Cultivo", "Empresa")
 
     def __init__(self, parent: tk.Widget, db_firestore: firestore.Client) -> None:
         super().__init__(parent, db_firestore)
@@ -75,18 +78,22 @@ class StockCampoWindow(BaseToolWindow):
 
         frame_filtros = ttk.LabelFrame(container, text="Filtros", padding=10)
         frame_filtros.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        frame_filtros.columnconfigure(0, weight=1)
+        frame_filtros.columnconfigure(1, weight=0)
 
-        self.btn_calcular = ttk.Button(frame_filtros, text="🔍 Calcular", command=self._lanzar_calculo)
+        self._build_segmentadores(frame_filtros)
+
+        frame_acciones = ttk.Frame(frame_filtros)
+        frame_acciones.grid(row=0, column=1, sticky="e")
+
+        self.btn_calcular = ttk.Button(frame_acciones, text="🔍 Calcular", command=self._lanzar_calculo)
         self.btn_calcular.grid(row=0, column=0, padx=6, pady=(0, 6), sticky="e")
 
-        self.btn_reset_filtros = ttk.Button(frame_filtros, text="♻ Reiniciar filtros", command=self._reiniciar_filtros)
+        self.btn_reset_filtros = ttk.Button(frame_acciones, text="♻ Reiniciar filtros", command=self._reiniciar_filtros)
         self.btn_reset_filtros.grid(row=0, column=1, padx=6, pady=(0, 6), sticky="e")
 
-        self.btn_exportar = ttk.Button(frame_filtros, text="👁 Ver PDF", command=self._exportar_pdf)
+        self.btn_exportar = ttk.Button(frame_acciones, text="👁 Ver PDF", command=self._exportar_pdf)
         self.btn_exportar.grid(row=0, column=2, padx=6, pady=(0, 6), sticky="e")
-
-        for col in range(3):
-            frame_filtros.columnconfigure(col, weight=1)
 
         frame_dashboard = ttk.Frame(container)
         frame_dashboard.grid(row=1, column=0, sticky="nsew")
@@ -206,6 +213,29 @@ class StockCampoWindow(BaseToolWindow):
             padx=(0, 6),
             pady=(8, 0),
         )
+
+    def _build_segmentadores(self, parent: ttk.LabelFrame) -> None:
+        self.frame_segmentadores = ttk.Frame(parent)
+        self.frame_segmentadores.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 6))
+        self.frame_segmentadores.columnconfigure(0, weight=1)
+        self.frame_segmentadores.columnconfigure(1, weight=1)
+
+        self.segmentador_blocks: dict[str, dict[str, Any]] = {}
+        for idx, section in enumerate(self.SEGMENTADOR_SECTIONS):
+            block = ttk.LabelFrame(self.frame_segmentadores, text=section.upper(), padding=8)
+            block.grid(row=0, column=idx, sticky="ew", padx=(0, 8) if idx == 0 else (8, 0))
+            block.columnconfigure(0, weight=1)
+
+            content = ttk.Frame(block)
+            content.grid(row=0, column=0, sticky="ew")
+            content.columnconfigure(0, weight=1)
+
+            self.segmentador_blocks[section] = {
+                "container": block,
+                "content": content,
+                "buttons": {},
+                "all_values": [],
+            }
 
     def _enable_mousewheel(self, canvas: tk.Canvas) -> None:
         def _on_mousewheel(event: tk.Event, target_canvas: tk.Canvas = canvas) -> None:
@@ -372,7 +402,61 @@ class StockCampoWindow(BaseToolWindow):
             unique_values = sorted({self._value_or_empty(row.get(field)) for row in rows})
             current_selection = set(self._selected_values.get(section, set()))
             self._selected_values[section] = {value for value in current_selection if value in set(unique_values)}
-            self._render_side_filter_block(section, unique_values, self._selected_values[section])
+            if section in self.SEGMENTADOR_SECTIONS:
+                self._render_segmentador(section, unique_values)
+            else:
+                self._render_side_filter_block(section, unique_values, self._selected_values[section])
+
+    def _render_segmentador(self, section: str, values: list[str]) -> None:
+        block = self.segmentador_blocks.get(section)
+        if not block:
+            return
+
+        for button in block["buttons"].values():
+            button.destroy()
+        block["buttons"] = {}
+        block["all_values"] = list(values)
+
+        for idx, value in enumerate(values):
+            button = tk.Button(
+                block["content"],
+                text=value or "(Vacío)",
+                relief="raised",
+                bd=1,
+                padx=8,
+                pady=2,
+                command=lambda selected_value=value, selected_section=section: self._toggle_segmentador_value(
+                    selected_section,
+                    selected_value,
+                ),
+            )
+            button.grid(row=0, column=idx, padx=(0, 6), pady=(0, 2), sticky="w")
+            block["buttons"][value] = button
+
+        self._update_segmentador_visual(section)
+
+    def _toggle_segmentador_value(self, section: str, value: str) -> None:
+        selected = self._selected_values.setdefault(section, set())
+        if value in selected:
+            selected.remove(value)
+        else:
+            selected.add(value)
+        self._apply_side_filters()
+
+    def _update_segmentador_visual(self, section: str) -> None:
+        block = self.segmentador_blocks.get(section)
+        if not block:
+            return
+        selected_values = self._selected_values.get(section, set())
+        for value, button in block["buttons"].items():
+            is_selected = value in selected_values
+            button.configure(
+                relief="sunken" if is_selected else "raised",
+                background="#2f2f2f" if is_selected else "#f2f2f2",
+                foreground="#ffffff" if is_selected else "#000000",
+                activebackground="#3d3d3d" if is_selected else "#e5e5e5",
+                activeforeground="#ffffff" if is_selected else "#000000",
+            )
 
     def _render_side_filter_block(self, section: str, values: list[str], selected_values: set[str]) -> None:
         block = self.side_filter_blocks.get(section)
@@ -487,9 +571,8 @@ class StockCampoWindow(BaseToolWindow):
 
         # 3️⃣ Recalcular valores disponibles por bloque dinámicamente
         for section, field in self.FILTER_CONFIG.items():
-            available_values = {
-                self._value_or_empty(r.get(field)) for r in filtered_rows
-            }
+            rows_for_section = self._filter_rows_by_selection(raw_rows, selected_by_section, ignored_section=section)
+            available_values = {self._value_or_empty(r.get(field)) for r in rows_for_section}
 
             # Eliminar selecciones que ya no existan
             current_selection = self._selected_values.get(section, set())
@@ -497,11 +580,23 @@ class StockCampoWindow(BaseToolWindow):
             self._selected_values[section] = valid_selection
 
             # Volver a renderizar bloque con selección válida
-            self._render_side_filter_block(
-                section,
-                sorted(available_values),
-                valid_selection,
-            )
+            if section in self.SEGMENTADOR_SECTIONS:
+                self._render_segmentador(section, sorted(available_values))
+            else:
+                self._render_side_filter_block(
+                    section,
+                    sorted(available_values),
+                    valid_selection,
+                )
+
+        selected_by_section = {}
+        for section, field in self.FILTER_CONFIG.items():
+            selected = self._selected_values.get(section, set())
+            if not selected:
+                selected_by_section[section] = {self._value_or_empty(r.get(field)) for r in raw_rows}
+            else:
+                selected_by_section[section] = selected
+        self._rows = self._filter_rows_by_selection(raw_rows, selected_by_section)
 
         # 4️⃣ Renderizar árbol
         self._render_tree_rows(self._rows)
@@ -576,10 +671,13 @@ class StockCampoWindow(BaseToolWindow):
         self._syncing_filters = True
         for section, field in self.FILTER_CONFIG.items():
             self._selected_values[section] = set()
-            for _, var in self.side_filter_blocks.get(section, {}).get("variables", []):
-                var.set(False)
             full_values = sorted({self._value_or_empty(row.get(field)) for row in self._raw_rows})
-            self._render_side_filter_block(section, full_values, set())
+            if section in self.SEGMENTADOR_SECTIONS:
+                self._render_segmentador(section, full_values)
+            else:
+                for _, var in self.side_filter_blocks.get(section, {}).get("variables", []):
+                    var.set(False)
+                self._render_side_filter_block(section, full_values, set())
         self._syncing_filters = False
         self._apply_side_filters()
 
