@@ -16,9 +16,9 @@ import tkinter as tk
 from firebase_admin import firestore
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.pdfgen import canvas
-from reportlab.platypus import Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from tkinter import messagebox, ttk
 
 from ui_utils import BaseToolWindow
@@ -34,6 +34,13 @@ class StockCampoWindow(BaseToolWindow):
         "ROJO": "#ffd6d6",
         "AMARILLO": "#fff7bf",
         "VERDE": "#d8f5d0",
+    }
+    FILTER_CONFIG = {
+        "F. Carga": "Fcarga",
+        "Socio": "Socio",
+        "Variedad": "Variedad",
+        "Color": "Color",
+        "Plataforma": "Plataforma",
     }
 
     def __init__(self, parent: tk.Widget, db_firestore: firestore.Client) -> None:
@@ -360,14 +367,7 @@ class StockCampoWindow(BaseToolWindow):
         self._apply_side_filters()
 
     def _populate_side_filters(self, rows: list[dict[str, Any]]) -> None:
-        config = {
-            "F. Carga": "Fcarga",
-            "Socio": "Socio",
-            "Variedad": "Variedad",
-            "Color": "Color",
-            "Plataforma": "Plataforma",
-        }
-        for section, field in config.items():
+        for section, field in self.FILTER_CONFIG.items():
             unique_values = sorted({self._value_or_empty(row.get(field)) for row in rows})
             self._render_side_filter_block(section, unique_values, set())
 
@@ -381,7 +381,7 @@ class StockCampoWindow(BaseToolWindow):
         block["checkbuttons"] = []
         block["all_values"] = list(values)
 
-        select_all_var = tk.BooleanVar(value=False)
+        select_all_var = tk.BooleanVar(value=bool(values) and set(values).issubset(selected_values))
 
         def on_select_all_change() -> None:
             if self._syncing_filters:
@@ -390,6 +390,15 @@ class StockCampoWindow(BaseToolWindow):
             self._syncing_filters = True
             for _, item_var in block["variables"]:
                 item_var.set(should_select)
+            self._syncing_filters = False
+            self._apply_side_filters()
+
+        def on_item_change() -> None:
+            if self._syncing_filters:
+                return
+            all_marked = bool(block["variables"]) and all(var.get() for _, var in block["variables"])
+            self._syncing_filters = True
+            select_all_var.set(all_marked)
             self._syncing_filters = False
             self._apply_side_filters()
 
@@ -409,11 +418,15 @@ class StockCampoWindow(BaseToolWindow):
                 block["content"],
                 text=value or "(Vacío)",
                 variable=var,
-                command=self._apply_side_filters,
+                command=on_item_change,
             )
             check.pack(fill="x", anchor="w")
             block["variables"].append((value, var))
             block["checkbuttons"].append(check)
+
+        self._syncing_filters = True
+        select_all_var.set(bool(block["variables"]) and all(var.get() for _, var in block["variables"]))
+        self._syncing_filters = False
 
     def _value_or_empty(self, value: Any) -> str:
         return "" if value is None else str(value).strip()
@@ -426,41 +439,45 @@ class StockCampoWindow(BaseToolWindow):
             return selected
         return set(block.get("all_values", []))
 
+    def _filter_rows_by_selection(
+        self,
+        rows: list[dict[str, Any]],
+        selected_by_section: dict[str, set[str]],
+        ignored_section: str | None = None,
+    ) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            include = True
+            for section, field in self.FILTER_CONFIG.items():
+                if section == ignored_section:
+                    continue
+                if self._value_or_empty(row.get(field)) not in selected_by_section.get(section, set()):
+                    include = False
+                    break
+            if include:
+                filtered.append(row)
+        return filtered
+
     def _apply_side_filters(self) -> None:
         if self._syncing_filters:
             return
         raw_rows = getattr(self, "_raw_rows", [])
-        filter_config = {
-            "F. Carga": "Fcarga",
-            "Socio": "Socio",
-            "Variedad": "Variedad",
-            "Color": "Color",
-            "Plataforma": "Plataforma",
+
+        current_checked = {
+            section: {val for val, var in self.side_filter_blocks.get(section, {}).get("variables", []) if var.get()}
+            for section in self.FILTER_CONFIG
         }
+        selected_by_section = {section: self._get_selected_values(section) for section in self.FILTER_CONFIG}
 
-        selected_by_section = {section: self._get_selected_values(section) for section in filter_config}
-        filtered_rows: list[dict[str, Any]] = []
-        for row in raw_rows:
-            include = True
-            for section, field in filter_config.items():
-                if self._value_or_empty(row.get(field)) not in selected_by_section[section]:
-                    include = False
-                    break
-            if include:
-                filtered_rows.append(row)
-        self._rows = filtered_rows
+        self._rows = self._filter_rows_by_selection(raw_rows, selected_by_section)
 
-        available_values = {
-            section: sorted({self._value_or_empty(row.get(field)) for row in filtered_rows})
-            for section, field in filter_config.items()
-        }
+        for section, field in self.FILTER_CONFIG.items():
+            rows_for_section = self._filter_rows_by_selection(raw_rows, selected_by_section, ignored_section=section)
+            available_values = sorted({self._value_or_empty(row.get(field)) for row in rows_for_section})
+            kept_selected = {val for val in current_checked.get(section, set()) if val in set(available_values)}
+            self._render_side_filter_block(section, available_values, kept_selected)
 
-        for section in filter_config:
-            current_selected = {val for val, var in self.side_filter_blocks.get(section, {}).get("variables", []) if var.get()}
-            kept_selected = {val for val in current_selected if val in set(available_values[section])}
-            self._render_side_filter_block(section, available_values[section], kept_selected)
-
-        self._render_tree_rows(filtered_rows)
+        self._render_tree_rows(self._rows)
 
     def _render_tree_rows(self, rows: list[dict[str, Any]]) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -530,12 +547,11 @@ class StockCampoWindow(BaseToolWindow):
 
     def _reiniciar_filtros(self) -> None:
         self._syncing_filters = True
-        for block in self.side_filter_blocks.values():
-            for _, var in block.get("variables", []):
+        for section, field in self.FILTER_CONFIG.items():
+            for _, var in self.side_filter_blocks.get(section, {}).get("variables", []):
                 var.set(False)
-            select_all_var = block.get("select_all_var")
-            if select_all_var is not None:
-                select_all_var.set(False)
+            full_values = sorted({self._value_or_empty(row.get(field)) for row in self._raw_rows})
+            self._render_side_filter_block(section, full_values, set())
         self._syncing_filters = False
         self._apply_side_filters()
 
@@ -595,27 +611,16 @@ class StockCampoWindow(BaseToolWindow):
                 self._temp_logo_path = None
 
     def _crear_pdf(self, filename: str) -> None:
-        c = canvas.Canvas(filename, pagesize=landscape(A4))
-        width, height = landscape(A4)
-
-        logo_path = self._resolve_logo_for_pdf()
-        if logo_path:
-            try:
-                c.drawImage(logo_path, 1.4 * cm, height - 2.7 * cm, width=2.8 * cm, height=1.7 * cm, mask="auto")
-            except Exception:  # noqa: BLE001
-                pass
-
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(4.6 * cm, height - 1.7 * cm, "Stock de Campo")
-        c.setFont("Helvetica", 10)
-        c.drawString(
-            4.6 * cm,
-            height - 2.25 * cm,
-            f"Última actualización datos: {self._obtener_ultima_actualizacion()}",
+        doc = SimpleDocTemplate(
+            filename,
+            pagesize=landscape(A4),
+            leftMargin=1.2 * cm,
+            rightMargin=1.2 * cm,
+            topMargin=3.3 * cm,
+            bottomMargin=1.2 * cm,
         )
-        c.setFont("Helvetica", 10)
-        c.drawRightString(width - 1.5 * cm, height - 1.7 * cm, datetime.datetime.now().strftime("%d/%m/%Y %H:%M"))
 
+        styles = getSampleStyleSheet()
         header = ["Detalle", "Plataforma", "Empresa", "Cultivo", "Restricciones", "KilosPendientes"]
         table_data = [header]
         row_styles: list[tuple[int, str | None]] = []
@@ -665,7 +670,7 @@ class StockCampoWindow(BaseToolWindow):
 
         table = Table(
             table_data,
-            colWidths=[8.1 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm, 6.5 * cm, 3.2 * cm],
+            colWidths=[8.1 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm, 6.5 * cm, 3.0 * cm],
             repeatRows=1,
         )
         style = TableStyle(
@@ -676,7 +681,7 @@ class StockCampoWindow(BaseToolWindow):
                 ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
                 ("FONTSIZE", (0, 0), (-1, -1), 8),
                 ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
-                ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
+                ("ALIGN", (-1, 0), (-1, -1), "RIGHT"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ]
         )
@@ -698,12 +703,37 @@ class StockCampoWindow(BaseToolWindow):
                     style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor(self.COLOR_MAP["VERDE"]))
 
         table.setStyle(style)
-        table.wrapOn(c, width - 3 * cm, height - 7.8 * cm)
-        table.drawOn(c, 1.3 * cm, 2.7 * cm)
 
-        c.setFont("Helvetica-Bold", 11)
-        c.drawRightString(width - 1.5 * cm, 1.6 * cm, f"TOTAL GENERAL: {self._format_kilos(total_general)} kg")
-        c.save()
+        total_paragraph = Paragraph(
+            f"<b>TOTAL GENERAL: {self._format_kilos(total_general)} kg</b>",
+            styles["Heading4"],
+        )
+
+        logo_path = self._resolve_logo_for_pdf()
+
+        def draw_page_header(pdf_canvas: Any, pdf_doc: Any) -> None:
+            width, height = landscape(A4)
+            if logo_path:
+                try:
+                    pdf_canvas.drawImage(logo_path, 1.2 * cm, height - 2.6 * cm, width=2.8 * cm, height=1.7 * cm, mask="auto")
+                except Exception:  # noqa: BLE001
+                    pass
+            pdf_canvas.setFont("Helvetica-Bold", 15)
+            pdf_canvas.drawString(4.3 * cm, height - 1.5 * cm, "Stock de Campo")
+            pdf_canvas.setFont("Helvetica", 9)
+            pdf_canvas.drawString(
+                4.3 * cm,
+                height - 2.05 * cm,
+                f"Última actualización datos: {self._obtener_ultima_actualizacion()}",
+            )
+            pdf_canvas.drawRightString(
+                width - 1.2 * cm,
+                height - 1.5 * cm,
+                datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+            )
+
+        story = [Spacer(1, 0.2 * cm), table, Spacer(1, 0.3 * cm), total_paragraph]
+        doc.build(story, onFirstPage=draw_page_header, onLaterPages=draw_page_header)
 
 
 def abrir_stock_campo(parent: tk.Widget, db: firestore.Client) -> None:
