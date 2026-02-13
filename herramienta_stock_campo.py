@@ -454,6 +454,7 @@ class StockCampoWindow(BaseToolWindow):
         if not block:
             return
 
+        todo_key = "__TODO__"
         max_cols = self._calculate_segmentador_max_cols(section)
         same_values = set(values) == set(block["all_values"])
         same_layout = block.get("last_max_cols") == max_cols
@@ -467,10 +468,12 @@ class StockCampoWindow(BaseToolWindow):
         block["all_values"] = list(values)
         block["last_max_cols"] = max_cols
 
-        for idx, value in enumerate(values):
+        values_with_todo = [todo_key, *values]
+        for idx, value in enumerate(values_with_todo):
+            button_text = "(Todo)" if value == todo_key else (value or "(Vacío)")
             button = tk.Button(
                 block["content"],
-                text=value or "(Vacío)",
+                text=button_text,
                 relief="raised",
                 bd=1,
                 padx=8,
@@ -489,10 +492,13 @@ class StockCampoWindow(BaseToolWindow):
 
     def _toggle_segmentador_value(self, section: str, value: str) -> None:
         selected = self._selected_values.setdefault(section, set())
-        if value in selected:
-            selected.remove(value)
+        if value == "__TODO__":
+            self._selected_values[section] = set()
         else:
-            selected.add(value)
+            if value in selected:
+                selected.remove(value)
+            else:
+                selected.add(value)
         self._update_segmentador_visual(section)
         self._apply_side_filters()
 
@@ -500,9 +506,10 @@ class StockCampoWindow(BaseToolWindow):
         block = self.segmentador_blocks.get(section)
         if not block:
             return
+        todo_key = "__TODO__"
         selected_values = self._selected_values.get(section, set())
         for value, button in block["buttons"].items():
-            is_selected = value in selected_values
+            is_selected = (not selected_values) if value == todo_key else value in selected_values
             button.configure(
                 relief="sunken" if is_selected else "raised",
                 background="#2f2f2f" if is_selected else "#f2f2f2",
