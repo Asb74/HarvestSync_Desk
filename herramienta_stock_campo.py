@@ -473,7 +473,7 @@ class StockCampoWindow(BaseToolWindow):
         max_cols = max(1, content_width // (min_button_width_px + horizontal_gap))
         max_cols = min(max_cols, len(values_with_todo))
 
-        same_values = set(values) == set(block["all_values"])
+        same_values = set(values_with_todo) == set(block["all_values"])
         same_layout = block.get("last_max_cols") == max_cols
         if same_values and same_layout:
             self._update_segmentador_visual(section)
@@ -490,7 +490,7 @@ class StockCampoWindow(BaseToolWindow):
             content.columnconfigure(col, weight=1, uniform=f"segment_{section}")
 
         block["buttons"] = {}
-        block["all_values"] = list(values)
+        block["all_values"] = list(values_with_todo)
         block["last_max_cols"] = max_cols
 
         for idx, value in enumerate(values_with_todo):
@@ -699,7 +699,7 @@ class StockCampoWindow(BaseToolWindow):
                     open=True,
                 )
                 for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
-                    color = self._value_or_empty(row.get("Color")).upper()
+                    color = color_txt
                     tag_name = ""
                     if color:
                         tag_name = f"COLOR_{color}"
@@ -857,17 +857,18 @@ class StockCampoWindow(BaseToolWindow):
                 row_styles.append((len(table_data) - 1, "socio"))
 
                 for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
+                    color_txt = self._value_or_empty(row.get("Color")).upper()
                     table_data.append(
                         [
                             f"      {albaran}",
                             self._value_or_empty(row.get("Plataforma")),
                             self._value_or_empty(row.get("Empresa")),
                             self._value_or_empty(row.get("Cultivo")),
-                            (f"■ {self._value_or_empty(row.get("Color")).upper()}" if self._value_or_empty(row.get("Color")) else ""),
+                            (f"■ {color_txt}" if color_txt else ""),
                             self._format_kilos(kilos),
                         ]
                     )
-                    color = self._value_or_empty(row.get("Color")).upper()
+                    color = color_txt
                     row_styles.append((len(table_data) - 1, color))
 
         table = Table(
