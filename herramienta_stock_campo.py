@@ -445,6 +445,7 @@ class StockCampoWindow(BaseToolWindow):
             self.tree.configure(show="tree headings")
             self.tree.heading("#0", text="Detalle", command=lambda: self._on_tree_heading_click("#0"))
             self.tree.column("#0", width=260, anchor="w")
+        self._update_tree_headings_visual()
         self._populate_side_filters(rows)
         self._apply_side_filters()
 
@@ -454,12 +455,32 @@ class StockCampoWindow(BaseToolWindow):
         else:
             self._sort_column = column
             self._sort_descending = False
+        self._update_tree_headings_visual()
         self._render_tree_rows(self._rows)
+
+    def _update_tree_headings_visual(self) -> None:
+        base_headings = {
+            "#0": "Detalle",
+            "Boleta": "Boleta",
+            "Plataforma": "Plataforma",
+            "Empresa": "Empresa",
+            "Cultivo": "Cultivo",
+            "Variedad": "Variedad",
+            "Restricciones": "Restricciones",
+            "KilosPendientes": "Neto",
+        }
+        for column in ("#0", *self.tree["columns"]):
+            heading_text = base_headings.get(column, str(column))
+            if column == self._sort_column:
+                arrow = "▼" if self._sort_descending else "▲"
+                heading_text = f"{heading_text} {arrow}"
+            self.tree.heading(column, text=heading_text)
 
     def _get_item_sort_key(self, item: tuple[str, dict[str, Any], float]) -> Any:
         albaran, row, kilos = item
+        albaran_limpio = self._value_or_empty(albaran)
         sort_map = {
-            "#0": self._value_or_empty(albaran),
+            "#0": albaran_limpio,
             "Boleta": self._value_or_empty(row.get("Boleta")),
             "Plataforma": self._value_or_empty(row.get("Plataforma")),
             "Empresa": self._value_or_empty(row.get("Empresa")),
@@ -468,7 +489,7 @@ class StockCampoWindow(BaseToolWindow):
             "Restricciones": self._value_or_empty(row.get("Color")).upper(),
             "KilosPendientes": float(kilos),
         }
-        value = sort_map.get(self._sort_column, self._value_or_empty(albaran))
+        value = sort_map.get(self._sort_column, albaran_limpio)
         if isinstance(value, str):
             return value.casefold()
         return value
@@ -710,8 +731,7 @@ class StockCampoWindow(BaseToolWindow):
     def _render_tree_rows(self, rows: list[dict[str, Any]]) -> None:
         self.tree.delete(*self.tree.get_children())
         estructura, total_general = self._build_hierarchical_structure(rows)
-        for variedad in sorted(estructura.keys(), key=lambda value: value.casefold(), reverse=self._sort_descending if self._sort_column == "Variedad" else False):
-            variedad_node = estructura[variedad]
+        for variedad, variedad_node in estructura.items():
             variedad_iid = self.tree.insert(
                 "",
                 "end",
@@ -719,8 +739,7 @@ class StockCampoWindow(BaseToolWindow):
                 values=("", "", "", "", "", "", self._format_kilos(variedad_node["total"])),
                 open=True,
             )
-            for socio in sorted(variedad_node["socios"].keys(), key=lambda value: value.casefold(), reverse=self._sort_descending if self._sort_column == "#0" else False):
-                socio_node = variedad_node["socios"][socio]
+            for socio, socio_node in variedad_node["socios"].items():
                 socio_iid = self.tree.insert(
                     variedad_iid,
                     "end",
