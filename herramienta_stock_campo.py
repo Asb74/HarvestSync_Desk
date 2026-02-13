@@ -21,6 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_utils import BaseToolWindow
 
 MDB_PATH = r"X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb"
+ACTUALIZACIONES_PATH = Path(r"X:\\Backup Perceco\\actualizaciones.txt")
 
 
 class StockCampoWindow(BaseToolWindow):
@@ -43,11 +44,13 @@ class StockCampoWindow(BaseToolWindow):
         self.variedad_var = tk.StringVar()
         self.restricciones_var = tk.StringVar()
         self.total_general_var = tk.StringVar(value="TOTAL GENERAL: 0 kg")
+        self.actualizacion_var = tk.StringVar(value="Última actualización: No disponible")
 
         self._rows: list[dict[str, Any]] = []
         self._temp_logo_path: str | None = None
 
         self._build_ui()
+        self._actualizar_label_actualizacion()
         self._cargar_valores_filtros()
 
     def _build_ui(self) -> None:
@@ -99,6 +102,14 @@ class StockCampoWindow(BaseToolWindow):
         frame_tabla = ttk.Frame(container)
         frame_tabla.pack(fill="both", expand=True, padx=4, pady=4)
 
+        self.lbl_actualizacion = ttk.Label(
+            frame_tabla,
+            textvariable=self.actualizacion_var,
+            font=("Segoe UI", 10),
+            anchor="e",
+        )
+        self.lbl_actualizacion.grid(row=0, column=0, sticky="e", pady=(0, 4))
+
         columns = (
             "Plataforma",
             "Empresa",
@@ -122,10 +133,10 @@ class StockCampoWindow(BaseToolWindow):
         scroll_x = ttk.Scrollbar(frame_tabla, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scroll_y.grid(row=0, column=1, sticky="ns")
-        scroll_x.grid(row=1, column=0, sticky="ew")
-        frame_tabla.rowconfigure(0, weight=1)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        scroll_y.grid(row=1, column=1, sticky="ns")
+        scroll_x.grid(row=2, column=0, sticky="ew")
+        frame_tabla.rowconfigure(1, weight=1)
         frame_tabla.columnconfigure(0, weight=1)
 
         ttk.Label(container, textvariable=self.total_general_var, font=("Segoe UI", 11, "bold")).pack(
@@ -208,7 +219,12 @@ class StockCampoWindow(BaseToolWindow):
                 p.CULTIVO,
                 p.Variedad,
                 p.Restricciones,
-                SUM(IIf(Nz(p.NetoPartida, 0)=0, Nz(p.Neto, 0), Nz(p.NetoPartida, 0))) AS KilosPendientes
+                SUM(
+                    IIf(p.NetoPartida IS NULL OR p.NetoPartida = 0,
+                        IIf(p.Neto IS NULL, 0, p.Neto),
+                        p.NetoPartida
+                    )
+                ) AS KilosPendientes
             FROM PesosFres AS p
             LEFT JOIN (
                 {union_ids}
@@ -229,6 +245,27 @@ class StockCampoWindow(BaseToolWindow):
                 p.Restricciones
         """
         return sql, params
+
+    def _obtener_ultima_actualizacion(self) -> str:
+        try:
+            if not ACTUALIZACIONES_PATH.exists() or not ACTUALIZACIONES_PATH.is_file():
+                return "No disponible"
+
+            lineas = ACTUALIZACIONES_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for linea in reversed(lineas):
+                contenido = linea.strip()
+                if not contenido:
+                    continue
+                fecha_hora, separador, _ = contenido.partition(" - ")
+                if separador and fecha_hora.strip():
+                    return fecha_hora.strip()
+                return contenido
+        except Exception:  # noqa: BLE001
+            return "No disponible"
+        return "No disponible"
+
+    def _actualizar_label_actualizacion(self) -> None:
+        self.actualizacion_var.set(f"Última actualización: {self._obtener_ultima_actualizacion()}")
 
     def _lanzar_calculo(self) -> None:
         self.btn_calcular.configure(state="disabled")
@@ -364,6 +401,12 @@ class StockCampoWindow(BaseToolWindow):
         c.setFont("Helvetica-Bold", 16)
         c.drawString(4.6 * cm, height - 1.7 * cm, "Stock de Campo")
         c.setFont("Helvetica", 10)
+        c.drawString(
+            4.6 * cm,
+            height - 2.25 * cm,
+            f"Última actualización datos: {self._obtener_ultima_actualizacion()}",
+        )
+        c.setFont("Helvetica", 10)
         c.drawRightString(width - 1.5 * cm, height - 1.7 * cm, datetime.datetime.now().strftime("%d/%m/%Y %H:%M"))
 
         header = [
@@ -417,7 +460,7 @@ class StockCampoWindow(BaseToolWindow):
                 style.add("BACKGROUND", (0, idx), (-1, idx), colors.HexColor(self.COLOR_MAP["VERDE"]))
 
         table.setStyle(style)
-        table.wrapOn(c, width - 3 * cm, height - 7.3 * cm)
+        table.wrapOn(c, width - 3 * cm, height - 7.8 * cm)
         table.drawOn(c, 1.3 * cm, 2.7 * cm)
 
         c.setFont("Helvetica-Bold", 11)
