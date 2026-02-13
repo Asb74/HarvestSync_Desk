@@ -412,6 +412,10 @@ class StockCampoWindow(BaseToolWindow):
         if not block:
             return
 
+        if set(values) == set(block["all_values"]):
+            self._update_segmentador_visual(section)
+            return
+
         for button in block["buttons"].values():
             button.destroy()
         block["buttons"] = {}
@@ -441,6 +445,7 @@ class StockCampoWindow(BaseToolWindow):
             selected.remove(value)
         else:
             selected.add(value)
+        self._update_segmentador_visual(section)
         self._apply_side_filters()
 
     def _update_segmentador_visual(self, section: str) -> None:
@@ -582,21 +587,13 @@ class StockCampoWindow(BaseToolWindow):
             # Volver a renderizar bloque con selección válida
             if section in self.SEGMENTADOR_SECTIONS:
                 self._render_segmentador(section, sorted(available_values))
+                self._update_segmentador_visual(section)
             else:
                 self._render_side_filter_block(
                     section,
                     sorted(available_values),
                     valid_selection,
                 )
-
-        selected_by_section = {}
-        for section, field in self.FILTER_CONFIG.items():
-            selected = self._selected_values.get(section, set())
-            if not selected:
-                selected_by_section[section] = {self._value_or_empty(r.get(field)) for r in raw_rows}
-            else:
-                selected_by_section[section] = selected
-        self._rows = self._filter_rows_by_selection(raw_rows, selected_by_section)
 
         # 4️⃣ Renderizar árbol
         self._render_tree_rows(self._rows)
