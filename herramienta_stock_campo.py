@@ -381,7 +381,7 @@ class StockCampoWindow(BaseToolWindow):
         block["checkbuttons"] = []
         block["all_values"] = list(values)
 
-        select_all_var = tk.BooleanVar(value=bool(values) and set(values).issubset(selected_values))
+        select_all_var = tk.BooleanVar(value=bool(values) and set(selected_values) == set(values))
 
         def on_select_all_change() -> None:
             if self._syncing_filters:
@@ -451,7 +451,9 @@ class StockCampoWindow(BaseToolWindow):
             for section, field in self.FILTER_CONFIG.items():
                 if section == ignored_section:
                     continue
-                if self._value_or_empty(row.get(field)) not in selected_by_section.get(section, set()):
+                allowed = selected_by_section.get(section, set())
+                value = self._value_or_empty(row.get(field))
+                if allowed and value not in allowed:
                     include = False
                     break
             if include:
