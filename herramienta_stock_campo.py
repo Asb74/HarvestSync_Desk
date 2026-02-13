@@ -206,25 +206,25 @@ class StockCampoWindow(BaseToolWindow):
 
         where_clause = """
             WHERE p.AlbaranDef NOT IN (
-                SELECT IdPartida0 FROM Partidas
+                SELECT IdPartida0 FROM Partidas WHERE IdPartida0 IS NOT NULL
                 UNION
-                SELECT IdPartida1 FROM Partidas
+                SELECT IdPartida1 FROM Partidas WHERE IdPartida1 IS NOT NULL
                 UNION
-                SELECT IdPartida2 FROM Partidas
+                SELECT IdPartida2 FROM Partidas WHERE IdPartida2 IS NOT NULL
                 UNION
-                SELECT IdPartida3 FROM Partidas
+                SELECT IdPartida3 FROM Partidas WHERE IdPartida3 IS NOT NULL
                 UNION
-                SELECT IdPartida4 FROM Partidas
+                SELECT IdPartida4 FROM Partidas WHERE IdPartida4 IS NOT NULL
                 UNION
-                SELECT IdPartida5 FROM Partidas
+                SELECT IdPartida5 FROM Partidas WHERE IdPartida5 IS NOT NULL
                 UNION
-                SELECT IdPartida6 FROM Partidas
+                SELECT IdPartida6 FROM Partidas WHERE IdPartida6 IS NOT NULL
                 UNION
-                SELECT IdPartida7 FROM Partidas
+                SELECT IdPartida7 FROM Partidas WHERE IdPartida7 IS NOT NULL
                 UNION
-                SELECT IdPartida8 FROM Partidas
+                SELECT IdPartida8 FROM Partidas WHERE IdPartida8 IS NOT NULL
                 UNION
-                SELECT IdPartida9 FROM Partidas
+                SELECT IdPartida9 FROM Partidas WHERE IdPartida9 IS NOT NULL
             )
         """
         if filtros_sql:
