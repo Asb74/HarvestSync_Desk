@@ -293,53 +293,41 @@ class StockCampoWindow(BaseToolWindow):
                 params.append(valor)
 
         where_clause = """
-            WHERE p.AlbaranDef IS NOT NULL
-            AND NOT EXISTS (
-                SELECT 1
-                FROM Partidas pr
-                WHERE
-                    LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida0,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida1,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida2,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida3,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida4,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida5,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida6,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida7,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida8,50)
-                    OR LEFT(p.AlbaranDef,50) = LEFT(pr.IdPartida9,50)
-            )
+            WHERE
+                LEFT(p.AlbaranDef,50) NOT IN (
+                    SELECT LEFT(IdPartida0,50) FROM Partidas WHERE IdPartida0 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida1,50) FROM Partidas WHERE IdPartida1 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida2,50) FROM Partidas WHERE IdPartida2 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida3,50) FROM Partidas WHERE IdPartida3 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida4,50) FROM Partidas WHERE IdPartida4 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida5,50) FROM Partidas WHERE IdPartida5 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida6,50) FROM Partidas WHERE IdPartida6 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida7,50) FROM Partidas WHERE IdPartida7 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida8,50) FROM Partidas WHERE IdPartida8 IS NOT NULL
+                    UNION SELECT LEFT(IdPartida9,50) FROM Partidas WHERE IdPartida9 IS NOT NULL
+                )
         """
         if filtros_sql:
             where_clause += "\n            AND " + "\n            AND ".join(filtros_sql)
 
         sql = f"""
             SELECT
+                p.AlbaranDef,
+                p.Socio,
+                p.Fcarga,
+                p.Variedad,
                 p.Plataforma,
                 p.EMPRESA,
                 p.CULTIVO,
-                p.Variedad,
+                p.Neto,
+                p.NetoPartida,
                 p.Restricciones,
-                SUM(
-                    IIf(IsNull(p.NetoPartida) OR p.NetoPartida = 0,
-                        IIf(IsNull(p.Neto), 0, p.Neto),
-                        p.NetoPartida
-                    )
-                ) AS KilosPendientes
+                LEFT(m.Valor,50) AS Color
             FROM PesosFres AS p
+            LEFT JOIN MRestricciones AS m
+                ON LEFT(m.IdRestricciones,50) = LEFT(p.Restricciones,50)
+                AND LEFT(m.CULTIVO,50) = LEFT(p.CULTIVO,50)
             {where_clause}
-            GROUP BY
-                p.Plataforma,
-                p.EMPRESA,
-                p.CULTIVO,
-                p.Variedad,
-                p.Restricciones
-            ORDER BY
-                p.Plataforma,
-                p.EMPRESA,
-                p.CULTIVO,
-                p.Variedad,
-                p.Restricciones
         """
         return sql, params
 
@@ -398,52 +386,157 @@ class StockCampoWindow(BaseToolWindow):
         cur.execute(sql, params)
         data: list[dict[str, Any]] = []
         for row in cur.fetchall():
-            kilos = float(row.KilosPendientes or 0)
+            neto_partida = 0.0 if row.NetoPartida is None else float(row.NetoPartida)
+            neto = 0.0 if row.Neto is None else float(row.Neto)
+            kilos = neto_partida if neto_partida != 0 else neto
             data.append(
                 {
+                    "AlbaranDef": "" if row.AlbaranDef is None else str(row.AlbaranDef),
+                    "Socio": "" if row.Socio is None else str(row.Socio),
+                    "Fcarga": "" if row.Fcarga is None else str(row.Fcarga),
                     "Plataforma": "" if row.Plataforma is None else str(row.Plataforma),
                     "Empresa": "" if row.EMPRESA is None else str(row.EMPRESA),
                     "Cultivo": "" if row.CULTIVO is None else str(row.CULTIVO),
                     "Variedad": "" if row.Variedad is None else str(row.Variedad),
                     "Restricciones": "" if row.Restricciones is None else str(row.Restricciones),
+                    "Color": "" if row.Color is None else str(row.Color),
                     "KilosPendientes": kilos,
                 }
             )
         conn.close()
+        self._raw_rows = data
         return data
 
     def _mostrar_resultados(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = rows
+        if self.tree["show"] != "tree headings":
+            self.tree.configure(show="tree headings")
+            self.tree.heading("#0", text="Detalle")
+            self.tree.column("#0", width=260, anchor="w")
+        self._populate_side_filters(rows)
+        self._apply_side_filters()
+
+    def _populate_side_filters(self, rows: list[dict[str, Any]]) -> None:
+        config = {
+            "F. Carga": "Fcarga",
+            "Socio": "Socio",
+            "Variedad": "Variedad",
+            "Color": "Color",
+            "Plataforma": "Plataforma",
+        }
+        for section, field in config.items():
+            block = self.side_filter_blocks.get(section)
+            if not block:
+                continue
+            for check in block["checkbuttons"]:
+                check.destroy()
+            block["variables"] = []
+            block["checkbuttons"] = []
+            unique_values = sorted({self._value_or_empty(row.get(field)) for row in rows})
+            for value in unique_values:
+                var = tk.BooleanVar(value=True)
+                check = ttk.Checkbutton(
+                    block["content"],
+                    text=value or "(Vacío)",
+                    variable=var,
+                    command=self._apply_side_filters,
+                )
+                check.pack(fill="x", anchor="w")
+                block["variables"].append((value, var))
+                block["checkbuttons"].append(check)
+
+    def _value_or_empty(self, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    def _get_selected_values(self, section: str) -> set[str]:
+        block = self.side_filter_blocks.get(section, {})
+        variables = block.get("variables", [])
+        selected = {val for val, var in variables if var.get()}
+        return selected
+
+    def _apply_side_filters(self) -> None:
+        raw_rows = getattr(self, "_raw_rows", [])
+        selected_fcarga = self._get_selected_values("F. Carga")
+        selected_socio = self._get_selected_values("Socio")
+        selected_variedad = self._get_selected_values("Variedad")
+        selected_color = self._get_selected_values("Color")
+        selected_plataforma = self._get_selected_values("Plataforma")
+        filtered_rows: list[dict[str, Any]] = []
+        for row in raw_rows:
+            if self._value_or_empty(row.get("Fcarga")) not in selected_fcarga:
+                continue
+            if self._value_or_empty(row.get("Socio")) not in selected_socio:
+                continue
+            if self._value_or_empty(row.get("Variedad")) not in selected_variedad:
+                continue
+            if self._value_or_empty(row.get("Color")) not in selected_color:
+                continue
+            if self._value_or_empty(row.get("Plataforma")) not in selected_plataforma:
+                continue
+            filtered_rows.append(row)
+        self._rows = filtered_rows
         self.tree.delete(*self.tree.get_children())
-
+        estructura: dict[str, dict[str, Any]] = {}
         total_general = 0.0
-        for row in rows:
-            total_general += row["KilosPendientes"]
-            restr = row["Restricciones"].upper().strip()
-            tag = ""
-            if "ROJO" in restr:
-                tag = "ROJO"
-            elif "AMARILLO" in restr:
-                tag = "AMARILLO"
-            elif "VERDE" in restr:
-                tag = "VERDE"
-
-            self.tree.insert(
+        for row in filtered_rows:
+            variedad = self._value_or_empty(row.get("Variedad")) or "(Sin variedad)"
+            socio = self._value_or_empty(row.get("Socio")) or "(Sin socio)"
+            albaran = self._value_or_empty(row.get("AlbaranDef")) or "(Sin albarán)"
+            kilos = float(row.get("KilosPendientes") or 0.0)
+            total_general += kilos
+            if variedad not in estructura:
+                estructura[variedad] = {"total": 0.0, "socios": {}}
+            estructura[variedad]["total"] += kilos
+            socios = estructura[variedad]["socios"]
+            if socio not in socios:
+                socios[socio] = {"total": 0.0, "items": []}
+            socios[socio]["total"] += kilos
+            socios[socio]["items"].append((albaran, row, kilos))
+        for variedad in sorted(estructura.keys()):
+            variedad_node = estructura[variedad]
+            variedad_iid = self.tree.insert(
                 "",
                 "end",
-                values=(
-                    row["Plataforma"],
-                    row["Empresa"],
-                    row["Cultivo"],
-                    row["Variedad"],
-                    row["Restricciones"],
-                    f"{row['KilosPendientes']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
-                ),
-                tags=(tag,) if tag else (),
+                text=variedad,
+                values=("", "", "", "", "", self._format_kilos(variedad_node["total"])),
+                open=True,
             )
-
+            for socio in sorted(variedad_node["socios"].keys()):
+                socio_node = variedad_node["socios"][socio]
+                socio_iid = self.tree.insert(
+                    variedad_iid,
+                    "end",
+                    text=socio,
+                    values=("", "", "", "", "", self._format_kilos(socio_node["total"])),
+                    open=True,
+                )
+                for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
+                    restr = self._value_or_empty(row.get("Restricciones")).upper()
+                    tag = ""
+                    if "ROJO" in restr:
+                        tag = "ROJO"
+                    elif "AMARILLO" in restr:
+                        tag = "AMARILLO"
+                    elif "VERDE" in restr:
+                        tag = "VERDE"
+                    self.tree.insert(
+                        socio_iid,
+                        "end",
+                        text=albaran,
+                        values=(
+                            self._value_or_empty(row.get("Plataforma")),
+                            self._value_or_empty(row.get("Empresa")),
+                            self._value_or_empty(row.get("Cultivo")),
+                            self._value_or_empty(row.get("Variedad")),
+                            self._value_or_empty(row.get("Restricciones")),
+                            self._format_kilos(kilos),
+                        ),
+                        tags=(tag,) if tag else (),
+                    )
         total_fmt = f"{total_general:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         self.total_general_var.set(f"TOTAL GENERAL: {total_fmt} kg")
+
+    def _format_kilos(self, kilos: float) -> str:
+        return f"{kilos:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     def _resolve_logo_for_pdf(self) -> str | None:
         master_logo = getattr(self.master, "logo_icon", None)
