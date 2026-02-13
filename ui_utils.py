@@ -11,18 +11,21 @@ def aplicar_icono_principal(window: tk.Toplevel, parent: tk.Widget) -> None:
     if window is None or parent is None:
         return
 
+    master_candidate: tk.Misc | None = parent
+    while master_candidate is not None:
+        icon_reference = getattr(master_candidate, "logo_icon", None)
+        if icon_reference:
+            try:
+                window.iconphoto(True, icon_reference)
+                return
+            except tk.TclError:
+                break
+        master_candidate = getattr(master_candidate, "master", None)
+
     try:
         main_window = parent.winfo_toplevel()
     except tk.TclError:
         return
-
-    icon_reference = getattr(main_window, "logo_icon", None)
-    if icon_reference:
-        try:
-            window.iconphoto(False, icon_reference)
-            return
-        except tk.TclError:
-            pass
 
     try:
         current_icon = main_window.iconphoto(False)
