@@ -467,19 +467,43 @@ class StockCampoWindow(BaseToolWindow):
     def _apply_side_filters(self) -> None:
         if self._syncing_filters:
             return
+
         raw_rows = self._raw_rows
 
+        # 1️⃣ Construir selección activa (si vacío = todos)
         selected_by_section = {}
-        for section in self.FILTER_CONFIG:
+        for section, field in self.FILTER_CONFIG.items():
             selected = self._selected_values.get(section, set())
             if not selected:
                 selected_by_section[section] = {
-                    self._value_or_empty(r.get(self.FILTER_CONFIG[section]))
-                    for r in raw_rows
+                    self._value_or_empty(r.get(field)) for r in raw_rows
                 }
             else:
                 selected_by_section[section] = selected
-        self._rows = self._filter_rows_by_selection(raw_rows, selected_by_section)
+
+        # 2️⃣ Aplicar filtros al dataset
+        filtered_rows = self._filter_rows_by_selection(raw_rows, selected_by_section)
+        self._rows = filtered_rows
+
+        # 3️⃣ Recalcular valores disponibles por bloque dinámicamente
+        for section, field in self.FILTER_CONFIG.items():
+            available_values = {
+                self._value_or_empty(r.get(field)) for r in filtered_rows
+            }
+
+            # Eliminar selecciones que ya no existan
+            current_selection = self._selected_values.get(section, set())
+            valid_selection = current_selection.intersection(available_values)
+            self._selected_values[section] = valid_selection
+
+            # Volver a renderizar bloque con selección válida
+            self._render_side_filter_block(
+                section,
+                sorted(available_values),
+                valid_selection,
+            )
+
+        # 4️⃣ Renderizar árbol
         self._render_tree_rows(self._rows)
 
     def _render_tree_rows(self, rows: list[dict[str, Any]]) -> None:
