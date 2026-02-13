@@ -235,7 +235,49 @@ class StockCampoWindow(BaseToolWindow):
                 "content": content,
                 "buttons": {},
                 "all_values": [],
+                "last_max_cols": None,
+                "resize_after_id": None,
             }
+            content.bind(
+                "<Configure>",
+                lambda _, current_section=section: self._schedule_segmentador_resize(current_section),
+            )
+
+    def _schedule_segmentador_resize(self, section: str) -> None:
+        block = self.segmentador_blocks.get(section)
+        if not block:
+            return
+
+        resize_after_id = block.get("resize_after_id")
+        if resize_after_id:
+            self.after_cancel(resize_after_id)
+
+        block["resize_after_id"] = self.after(100, lambda: self._rerender_segmentador_for_resize(section))
+
+    def _rerender_segmentador_for_resize(self, section: str) -> None:
+        block = self.segmentador_blocks.get(section)
+        if not block:
+            return
+
+        block["resize_after_id"] = None
+        values = list(block.get("all_values", []))
+        if not values:
+            return
+
+        self._render_segmentador(section, values)
+        self._update_segmentador_visual(section)
+
+    def _calculate_segmentador_max_cols(self, section: str) -> int:
+        block = self.segmentador_blocks.get(section)
+        if not block:
+            return 1
+
+        width = block["content"].winfo_width()
+        if width <= 1:
+            width = 800
+
+        estimated_button_width = 120
+        return max(1, width // estimated_button_width)
 
     def _enable_mousewheel(self, canvas: tk.Canvas) -> None:
         def _on_mousewheel(event: tk.Event, target_canvas: tk.Canvas = canvas) -> None:
@@ -412,7 +454,10 @@ class StockCampoWindow(BaseToolWindow):
         if not block:
             return
 
-        if set(values) == set(block["all_values"]):
+        max_cols = self._calculate_segmentador_max_cols(section)
+        same_values = set(values) == set(block["all_values"])
+        same_layout = block.get("last_max_cols") == max_cols
+        if same_values and same_layout:
             self._update_segmentador_visual(section)
             return
 
@@ -420,6 +465,7 @@ class StockCampoWindow(BaseToolWindow):
             button.destroy()
         block["buttons"] = {}
         block["all_values"] = list(values)
+        block["last_max_cols"] = max_cols
 
         for idx, value in enumerate(values):
             button = tk.Button(
@@ -434,7 +480,9 @@ class StockCampoWindow(BaseToolWindow):
                     selected_value,
                 ),
             )
-            button.grid(row=0, column=idx, padx=(0, 6), pady=(0, 2), sticky="w")
+            row = idx // max_cols
+            col = idx % max_cols
+            button.grid(row=row, column=col, padx=(0, 6), pady=(0, 2), sticky="w")
             block["buttons"][value] = button
 
         self._update_segmentador_visual(section)
