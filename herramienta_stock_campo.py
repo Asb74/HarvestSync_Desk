@@ -952,7 +952,7 @@ class StockCampoWindow(BaseToolWindow):
                                 self._value_or_empty(row.get("Plataforma")),
                                 self._value_or_empty(row.get("Empresa")),
                                 self._value_or_empty(row.get("Cultivo")),
-                                (f"■ {self._value_or_empty(row.get("Color")).upper()}" if self._value_or_empty(row.get("Color")) else ""),
+                                (f"■ {self._value_or_empty(row.get('Color')).upper()}" if self._value_or_empty(row.get('Color')) else ""),
                                 self._format_kilos(kilos),
                             ]
                         )
