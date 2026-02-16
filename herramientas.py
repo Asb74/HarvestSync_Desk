@@ -7,6 +7,7 @@ from firebase_admin import firestore
 
 from herramienta_actualizar_efectivo import abrir_actualizar_efectivo
 from herramienta_stock_campo import abrir_stock_campo
+from ui_utils import aplicar_icono_principal
 
 
 class HerramientasWindow(tk.Toplevel):
@@ -43,31 +44,8 @@ class HerramientasWindow(tk.Toplevel):
         ).pack(fill="x", pady=4)
 
     def _apply_master_icon(self, master: tk.Widget) -> None:
-        """Hereda el icono configurado en la ventana principal si existe."""
-        if master is None:
-            return
-
-        try:
-            main_window = master.winfo_toplevel()
-        except tk.TclError:
-            return
-
-        icon_reference = getattr(main_window, "logo_icon", None)
-        if icon_reference:
-            try:
-                self.iconphoto(False, icon_reference)
-                return
-            except tk.TclError:
-                pass
-
-        try:
-            current_icon = main_window.iconphoto(False)
-            if isinstance(current_icon, (tuple, list)):
-                self.iconphoto(False, *current_icon)
-            elif current_icon:
-                self.iconphoto(False, current_icon)
-        except tk.TclError:
-            pass
+        """Hereda el icono global configurado en la ventana principal."""
+        aplicar_icono_principal(self, master)
 
 
 

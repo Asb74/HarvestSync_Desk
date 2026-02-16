@@ -29,9 +29,10 @@ from PIL import Image, ImageTk
 from tkinter import simpledialog
 from pathlib import Path
 from pdf_utils import cleanup_old_pdfs
+from ui_utils import apply_global_icon
 
 # === Funciones auxiliares ===
-def recurso_path(rel_path: str) -> str:
+def resource_path(rel_path: str) -> str:
     # 1) cuando está instalado (junto al .exe en Program Files)
     if getattr(sys, 'frozen', False):
         app_dir = Path(sys.executable).parent
@@ -44,11 +45,15 @@ def recurso_path(rel_path: str) -> str:
     # 3) ejecución normal (fuentes)
     return str(Path(__file__).resolve().parent / rel_path)
 
-cred = credentials.Certificate(recurso_path("HarvestSync.json"))
+def recurso_path(rel_path: str) -> str:
+    return resource_path(rel_path)
+
+
+cred = credentials.Certificate(resource_path("HarvestSync.json"))
 
 
 # === Inicializar Firebase ===
-cred = credentials.Certificate(recurso_path("HarvestSync.json"))
+cred = credentials.Certificate(resource_path("HarvestSync.json"))
 if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 db = firestore.client()
@@ -80,13 +85,8 @@ style.theme_use("clam")
 style.configure("TButton", padding=6, font=("Segoe UI", 10))
 style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
 
-# Icono aplicación (usar .ico directamente)
-try:
-    icon_path = recurso_path("icono_app.ico")
-    root.iconbitmap(icon_path)
-    logo_icon = None  # No necesitamos PhotoImage
-except Exception:
-    logo_icon = None
+# Icono aplicación global para Tk y Toplevel
+logo_icon = apply_global_icon(root)
 
 
 # Limpieza de PDFs temporales al iniciar la aplicación
