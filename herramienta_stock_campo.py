@@ -733,51 +733,59 @@ class StockCampoWindow(BaseToolWindow):
     def _render_tree_rows(self, rows: list[dict[str, Any]]) -> None:
         self.tree.delete(*self.tree.get_children())
         estructura, total_general = self._build_hierarchical_structure(rows)
-        for variedad, variedad_node in estructura.items():
-            variedad_iid = self.tree.insert(
+        for cultivo, cultivo_node in estructura.items():
+            cultivo_iid = self.tree.insert(
                 "",
                 "end",
-                text=variedad,
-                values=("", "", "", "", "", "", self._format_kilos(variedad_node["total"])),
+                text=cultivo,
+                values=("", "", "", "", "", "", self._format_kilos(cultivo_node["total"])),
                 open=True,
             )
-            for socio, socio_node in variedad_node["socios"].items():
-                socio_iid = self.tree.insert(
-                    variedad_iid,
+            for variedad, variedad_node in cultivo_node["variedades"].items():
+                variedad_iid = self.tree.insert(
+                    cultivo_iid,
                     "end",
-                    text=socio,
-                    values=("", "", "", "", "", "", self._format_kilos(socio_node["total"])),
+                    text=variedad,
+                    values=("", "", "", "", "", "", self._format_kilos(variedad_node["total"])),
                     open=True,
                 )
-                for albaran, row, kilos in sorted(
-                    socio_node["items"],
-                    key=self._get_item_sort_key,
-                    reverse=self._sort_descending,
-                ):
-                    color = self._value_or_empty(row.get("Color")).upper()
-                    tag_name = ""
-                    if color:
-                        tag_name = f"COLOR_{color}"
-                        if tag_name not in self._configured_color_tags and color in self.COLOR_MAP:
-                            self.tree.tag_configure(tag_name, background=self.COLOR_MAP[color])
-                            self._configured_color_tags.add(tag_name)
-                    restr_display = f"■ {color}" if color else ""
-                    boleta = self._value_or_empty(row.get("Boleta"))
-                    self.tree.insert(
-                        socio_iid,
+                for socio, socio_node in variedad_node["socios"].items():
+                    socio_iid = self.tree.insert(
+                        variedad_iid,
                         "end",
-                        text=albaran,
-                        values=(
-                            boleta,
-                            self._value_or_empty(row.get("Plataforma")),
-                            self._value_or_empty(row.get("Empresa")),
-                            self._value_or_empty(row.get("Cultivo")),
-                            self._value_or_empty(row.get("Variedad")),
-                            restr_display,
-                            self._format_kilos(kilos),
-                        ),
-                        tags=(tag_name,) if tag_name else (),
+                        text=socio,
+                        values=("", "", "", "", "", "", self._format_kilos(socio_node["total"])),
+                        open=True,
                     )
+                    for albaran, row, kilos in sorted(
+                        socio_node["items"],
+                        key=self._get_item_sort_key,
+                        reverse=self._sort_descending,
+                    ):
+                        color = self._value_or_empty(row.get("Color")).upper()
+                        tag_name = ""
+                        if color:
+                            tag_name = f"COLOR_{color}"
+                            if tag_name not in self._configured_color_tags and color in self.COLOR_MAP:
+                                self.tree.tag_configure(tag_name, background=self.COLOR_MAP[color])
+                                self._configured_color_tags.add(tag_name)
+                        restr_display = f"■ {color}" if color else ""
+                        boleta = self._value_or_empty(row.get("Boleta"))
+                        self.tree.insert(
+                            socio_iid,
+                            "end",
+                            text=albaran,
+                            values=(
+                                boleta,
+                                self._value_or_empty(row.get("Plataforma")),
+                                self._value_or_empty(row.get("Empresa")),
+                                self._value_or_empty(row.get("Cultivo")),
+                                self._value_or_empty(row.get("Variedad")),
+                                restr_display,
+                                self._format_kilos(kilos),
+                            ),
+                            tags=(tag_name,) if tag_name else (),
+                        )
         total_fmt = self._format_kilos(total_general)
         self.total_general_var.set(f"TOTAL GENERAL: {total_fmt} kg")
 
@@ -785,15 +793,20 @@ class StockCampoWindow(BaseToolWindow):
         estructura: dict[str, dict[str, Any]] = {}
         total_general = 0.0
         for row in rows:
+            cultivo = self._value_or_empty(row.get("Cultivo")) or "(Sin cultivo)"
             variedad = self._value_or_empty(row.get("Variedad")) or "(Sin variedad)"
             socio = self._value_or_empty(row.get("Socio")) or "(Sin socio)"
             albaran = self._value_or_empty(row.get("AlbaranDef")) or "(Sin albarán)"
             kilos = float(row.get("KilosPendientes") or 0.0)
             total_general += kilos
-            if variedad not in estructura:
-                estructura[variedad] = {"total": 0.0, "socios": {}}
-            estructura[variedad]["total"] += kilos
-            socios = estructura[variedad]["socios"]
+            if cultivo not in estructura:
+                estructura[cultivo] = {"total": 0.0, "variedades": {}}
+            estructura[cultivo]["total"] += kilos
+            variedades = estructura[cultivo]["variedades"]
+            if variedad not in variedades:
+                variedades[variedad] = {"total": 0.0, "socios": {}}
+            variedades[variedad]["total"] += kilos
+            socios = variedades[variedad]["socios"]
             if socio not in socios:
                 socios[socio] = {"total": 0.0, "items": []}
             socios[socio]["total"] += kilos
@@ -885,51 +898,66 @@ class StockCampoWindow(BaseToolWindow):
         row_styles: list[tuple[int, str | None]] = []
         estructura, total_general = self._build_hierarchical_structure(self._rows)
 
-        for variedad in sorted(estructura.keys()):
-            variedad_node = estructura[variedad]
+        for cultivo in sorted(estructura.keys()):
+            cultivo_node = estructura[cultivo]
             table_data.append(
                 [
-                    f"VARIEDAD: {variedad}",
+                    f"CULTIVO: {cultivo}",
                     "",
                     "",
                     "",
                     "",
                     "",
-                    self._format_kilos(variedad_node["total"]),
+                    self._format_kilos(cultivo_node["total"]),
                 ]
             )
-            row_styles.append((len(table_data) - 1, "variedad"))
+            row_styles.append((len(table_data) - 1, "cultivo"))
 
-            for socio in sorted(variedad_node["socios"].keys()):
-                socio_node = variedad_node["socios"][socio]
+            for variedad in sorted(cultivo_node["variedades"].keys()):
+                variedad_node = cultivo_node["variedades"][variedad]
                 table_data.append(
                     [
-                        f"   SOCIO: {socio}",
+                        f"   VARIEDAD: {variedad}",
                         "",
                         "",
                         "",
                         "",
                         "",
-                        self._format_kilos(socio_node["total"]),
+                        self._format_kilos(variedad_node["total"]),
                     ]
                 )
-                row_styles.append((len(table_data) - 1, "socio"))
+                row_styles.append((len(table_data) - 1, "variedad"))
 
-                for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
-                    boleta = self._value_or_empty(row.get("Boleta"))
+                for socio in sorted(variedad_node["socios"].keys()):
+                    socio_node = variedad_node["socios"][socio]
                     table_data.append(
                         [
-                            f"      {albaran}",
-                            boleta,
-                            self._value_or_empty(row.get("Plataforma")),
-                            self._value_or_empty(row.get("Empresa")),
-                            self._value_or_empty(row.get("Cultivo")),
-                            (f"■ {self._value_or_empty(row.get("Color")).upper()}" if self._value_or_empty(row.get("Color")) else ""),
-                            self._format_kilos(kilos),
+                            f"      SOCIO: {socio}",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            self._format_kilos(socio_node["total"]),
                         ]
                     )
-                    color = self._value_or_empty(row.get("Color")).upper()
-                    row_styles.append((len(table_data) - 1, color))
+                    row_styles.append((len(table_data) - 1, "socio"))
+
+                    for albaran, row, kilos in sorted(socio_node["items"], key=lambda item: item[0]):
+                        boleta = self._value_or_empty(row.get("Boleta"))
+                        table_data.append(
+                            [
+                                f"         {albaran}",
+                                boleta,
+                                self._value_or_empty(row.get("Plataforma")),
+                                self._value_or_empty(row.get("Empresa")),
+                                self._value_or_empty(row.get("Cultivo")),
+                                (f"■ {self._value_or_empty(row.get("Color")).upper()}" if self._value_or_empty(row.get("Color")) else ""),
+                                self._format_kilos(kilos),
+                            ]
+                        )
+                        color = self._value_or_empty(row.get("Color")).upper()
+                        row_styles.append((len(table_data) - 1, color))
 
         table = Table(
             table_data,
@@ -950,9 +978,12 @@ class StockCampoWindow(BaseToolWindow):
         )
 
         for row_idx, row_type in row_styles:
-            if row_type == "variedad":
+            if row_type == "cultivo":
                 style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor("#595959"))
                 style.add("TEXTCOLOR", (0, row_idx), (-1, row_idx), colors.white)
+                style.add("FONTNAME", (0, row_idx), (-1, row_idx), "Helvetica-Bold")
+            elif row_type == "variedad":
+                style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor("#a6a6a6"))
                 style.add("FONTNAME", (0, row_idx), (-1, row_idx), "Helvetica-Bold")
             elif row_type == "socio":
                 style.add("BACKGROUND", (0, row_idx), (-1, row_idx), colors.HexColor("#d9d9d9"))
