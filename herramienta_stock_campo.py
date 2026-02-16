@@ -374,6 +374,8 @@ class StockCampoWindow(BaseToolWindow):
         self.actualizacion_var.set(f"Última actualización: {self._obtener_ultima_actualizacion()}")
 
     def _lanzar_calculo(self, disable_buttons: bool = True) -> None:
+        self._actualizar_label_actualizacion()
+
         if disable_buttons:
             self.btn_calcular.configure(state="disabled")
             self.btn_exportar.configure(state="disabled")
