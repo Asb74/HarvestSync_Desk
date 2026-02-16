@@ -80,16 +80,14 @@ style.theme_use("clam")
 style.configure("TButton", padding=6, font=("Segoe UI", 10))
 style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
 
-# Icono cuadrado
+# Icono aplicación (usar .ico directamente)
 try:
-    icon_path = recurso_path("icono_app.png")
-    logo_img = Image.open(icon_path).resize((32, 32))
-    logo_icon = ImageTk.PhotoImage(logo_img)
-    root.iconphoto(False, logo_icon)
-except Exception:  # noqa: BLE001 - mantener compatibilidad con ejecuciones empaquetadas
+    icon_path = recurso_path("icono_app.ico")
+    root.iconbitmap(icon_path)
+    logo_icon = None  # No necesitamos PhotoImage
+except Exception:
     logo_icon = None
 
-root.logo_icon = logo_icon
 
 # Limpieza de PDFs temporales al iniciar la aplicación
 cleanup_old_pdfs(max_age_hours=24)
