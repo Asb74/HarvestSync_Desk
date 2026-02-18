@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-import pyodbc
+import sqlite3
 import tkinter as tk
 from firebase_admin import firestore
 from reportlab.lib import colors
@@ -23,8 +23,9 @@ from tkinter import messagebox, ttk
 
 from ui_utils import BaseToolWindow
 
-MDB_PATH = r"X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb"
-ACTUALIZACIONES_PATH = Path(r"X:\\Backup Perceco\\actualizaciones.txt")
+DB_FRUTA_PATH = r"X:\\BasesSQLite\\DBfruta.sqlite"
+DB_CALIDAD_PATH = r"X:\\BasesSQLite\\Partidas.BdCalidad.sqlite"
+ACTUALIZACIONES_PATH = Path(r"X:\\BasesSQLite\\ultima_actualizacion.txt")
 
 
 class StockCampoWindow(BaseToolWindow):
@@ -300,75 +301,61 @@ class StockCampoWindow(BaseToolWindow):
         canvas.bind("<Enter>", _bind_wheel)
         canvas.bind("<Leave>", _unbind_wheel)
 
-    def _get_connection(self) -> pyodbc.Connection:
-        conn_str = (
-            r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
-            f"DBQ={MDB_PATH};"
-        )
-        return pyodbc.connect(conn_str, timeout=60)
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(DB_FRUTA_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute(f"ATTACH DATABASE '{DB_CALIDAD_PATH}' AS bdcalidad;")
+        return conn
 
-    def _construir_sql(self) -> tuple[str, list[Any]]:
-        params: list[Any] = []
-
-        where_clause = """
-            WHERE
-                p.AlbaranDef IS NOT NULL
-                AND p.AlbaranDef <> ''
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM Partidas pr
-                    WHERE
-                        LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida0 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida1 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida2 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida3 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida4 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida5 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida6 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida7 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida8 & '',50)
-                        OR LEFT(p.AlbaranDef & '',50) = LEFT(pr.IdPartida9 & '',50)
-                )
-        """
-        sql = f"""
-            SELECT
-                p.AlbaranDef,
-                IIf(IsNull(p.Socio),'',p.Socio) AS Socio,
-                p.Fcarga,
-                IIf(IsNull(p.Variedad),'',p.Variedad) AS Variedad,
-                IIf(IsNull(p.Boleta),'',p.Boleta) AS Boleta,
-                IIf(IsNull(p.Plataforma),'',p.Plataforma) AS Plataforma,
-                IIf(IsNull(p.EMPRESA),'',p.EMPRESA) AS EMPRESA,
-                IIf(IsNull(p.CULTIVO),'',p.CULTIVO) AS CULTIVO,
-                p.Neto,
-                p.NetoPartida,
-                IIf(IsNull(p.Restricciones),'',p.Restricciones) AS Restricciones,
-                IIf(IsNull(LEFT(m.Valor & '',50)),'',LEFT(m.Valor & '',50)) AS Color
-            FROM PesosFres AS p
-            LEFT JOIN MRestricciones AS m
-                ON LEFT(m.IdRestricciones & '',50) = LEFT(p.Restricciones & '',50)
-                AND LEFT(m.CULTIVO & '',50) = LEFT(p.CULTIVO & '',50)
-            {where_clause}
-        """
-        return sql, params
+    def _construir_sql(self) -> tuple[str, list]:
+        sql = """
+        SELECT
+            p.AlbaranDef,
+            COALESCE(p.Socio,'') AS Socio,
+            p.Fcarga,
+            COALESCE(p.Variedad,'') AS Variedad,
+            COALESCE(p.Boleta,'') AS Boleta,
+            COALESCE(p.Plataforma,'') AS Plataforma,
+            COALESCE(p.EMPRESA,'') AS EMPRESA,
+            COALESCE(p.CULTIVO,'') AS CULTIVO,
+            p.Neto,
+            p.NetoPartida,
+            COALESCE(p.Restricciones,'') AS Restricciones,
+            COALESCE(m.Valor,'') AS Color
+        FROM PesosFres p
+        LEFT JOIN MRestricciones m
+            ON m.IdRestricciones = p.Restricciones
+           AND m.CULTIVO = p.CULTIVO
+        LEFT JOIN bdcalidad.PartidasIndex pi
+            ON p.AlbaranDef = pi.IdPartida
+        WHERE
+            p.AlbaranDef IS NOT NULL
+            AND p.AlbaranDef <> ''
+            AND pi.IdPartida IS NULL
+    """
+        return sql, []
 
     def _obtener_ultima_actualizacion(self) -> str:
         try:
-            if not ACTUALIZACIONES_PATH.exists() or not ACTUALIZACIONES_PATH.is_file():
+            if not ACTUALIZACIONES_PATH.exists():
                 return "No disponible"
 
-            lineas = ACTUALIZACIONES_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
-            for linea in reversed(lineas):
-                contenido = linea.strip()
-                if not contenido:
-                    continue
-                fecha_hora, separador, _ = contenido.partition(" - ")
-                if separador and fecha_hora.strip():
-                    return fecha_hora.strip()
-                return contenido
-        except Exception:  # noqa: BLE001
+            lineas = ACTUALIZACIONES_PATH.read_text(
+                encoding="utf-8",
+                errors="ignore"
+            ).splitlines()
+
+            for linea in lineas:
+                linea = linea.strip()
+                if linea and "/" in linea and ":" in linea:
+                    return linea
+
             return "No disponible"
-        return "No disponible"
+
+        except Exception:
+            return "No disponible"
 
     def _actualizar_label_actualizacion(self) -> None:
         self.actualizacion_var.set(f"Última actualización: {self._obtener_ultima_actualizacion()}")
@@ -403,38 +390,41 @@ class StockCampoWindow(BaseToolWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _ejecutar_consulta(self) -> list[dict[str, Any]]:
-        sql, params = self._construir_sql()
+        sql, _ = self._construir_sql()
         print("----- SQL GENERADA -----")
         print(sql)
-        print(f"PARAMS: {params}")
+        print("PARAMS: []")
         print("------------------------")
         conn = self._get_connection()
         cur = conn.cursor()
-        cur.execute(sql, params)
+        cur.execute(sql)
         data: list[dict[str, Any]] = []
         for row in cur.fetchall():
-            neto_partida = 0.0 if row.NetoPartida is None else float(row.NetoPartida)
-            neto = 0.0 if row.Neto is None else float(row.Neto)
+            neto_partida = 0.0 if row["NetoPartida"] is None else float(row["NetoPartida"])
+            neto = 0.0 if row["Neto"] is None else float(row["Neto"])
             kilos = neto_partida if neto_partida != 0 else neto
-            fcarga = row.Fcarga
-            if isinstance(fcarga, datetime.datetime):
-                fcarga_fmt = fcarga.strftime("%d/%m/%Y")
-            elif isinstance(fcarga, datetime.date):
-                fcarga_fmt = datetime.datetime.combine(fcarga, datetime.time.min).strftime("%d/%m/%Y")
+            fcarga = row["Fcarga"]
+
+            if isinstance(fcarga, str) and fcarga:
+                try:
+                    dt = datetime.datetime.fromisoformat(fcarga)
+                    fcarga_fmt = dt.strftime("%d/%m/%Y")
+                except Exception:
+                    fcarga_fmt = fcarga
             else:
-                fcarga_fmt = "" if fcarga is None else str(fcarga)
+                fcarga_fmt = ""
             data.append(
                 {
-                    "AlbaranDef": "" if row.AlbaranDef is None else str(row.AlbaranDef),
-                    "Socio": "" if row.Socio is None else str(row.Socio),
+                    "AlbaranDef": "" if row["AlbaranDef"] is None else str(row["AlbaranDef"]),
+                    "Socio": "" if row["Socio"] is None else str(row["Socio"]),
                     "Fcarga": fcarga_fmt,
-                    "Boleta": "" if row.Boleta is None else str(row.Boleta),
-                    "Plataforma": "" if row.Plataforma is None else str(row.Plataforma),
-                    "Empresa": "" if row.EMPRESA is None else str(row.EMPRESA),
-                    "Cultivo": "" if row.CULTIVO is None else str(row.CULTIVO),
-                    "Variedad": "" if row.Variedad is None else str(row.Variedad),
-                    "Restricciones": "" if row.Restricciones is None else str(row.Restricciones),
-                    "Color": "" if row.Color is None else str(row.Color),
+                    "Boleta": "" if row["Boleta"] is None else str(row["Boleta"]),
+                    "Plataforma": "" if row["Plataforma"] is None else str(row["Plataforma"]),
+                    "Empresa": "" if row["EMPRESA"] is None else str(row["EMPRESA"]),
+                    "Cultivo": "" if row["CULTIVO"] is None else str(row["CULTIVO"]),
+                    "Variedad": "" if row["Variedad"] is None else str(row["Variedad"]),
+                    "Restricciones": "" if row["Restricciones"] is None else str(row["Restricciones"]),
+                    "Color": "" if row["Color"] is None else str(row["Color"]),
                     "KilosPendientes": kilos,
                 }
             )
