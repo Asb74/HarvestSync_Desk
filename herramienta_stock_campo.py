@@ -306,7 +306,9 @@ class StockCampoWindow(BaseToolWindow):
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON;")
         conn.execute("PRAGMA busy_timeout = 5000;")
-        conn.execute(f"ATTACH DATABASE '{DB_CALIDAD_PATH}' AS bdcalidad;")
+        conn.execute(
+            f"ATTACH DATABASE '{DB_CALIDAD_PATH.replace('\\', '/')}' AS bdcalidad;"
+        )
         return conn
 
     def _construir_sql(self) -> tuple[str, list]:
@@ -396,39 +398,41 @@ class StockCampoWindow(BaseToolWindow):
         print("PARAMS: []")
         print("------------------------")
         conn = self._get_connection()
-        cur = conn.cursor()
-        cur.execute(sql)
-        data: list[dict[str, Any]] = []
-        for row in cur.fetchall():
-            neto_partida = 0.0 if row["NetoPartida"] is None else float(row["NetoPartida"])
-            neto = 0.0 if row["Neto"] is None else float(row["Neto"])
-            kilos = neto_partida if neto_partida != 0 else neto
-            fcarga = row["Fcarga"]
+        try:
+            cur = conn.cursor()
+            cur.execute(sql)
+            data: list[dict[str, Any]] = []
+            for row in cur.fetchall():
+                neto_partida = 0.0 if row["NetoPartida"] is None else float(row["NetoPartida"])
+                neto = 0.0 if row["Neto"] is None else float(row["Neto"])
+                kilos = neto_partida if neto_partida != 0 else neto
+                fcarga = row["Fcarga"]
 
-            if isinstance(fcarga, str) and fcarga:
-                try:
-                    dt = datetime.datetime.fromisoformat(fcarga)
-                    fcarga_fmt = dt.strftime("%d/%m/%Y")
-                except Exception:
-                    fcarga_fmt = fcarga
-            else:
-                fcarga_fmt = ""
-            data.append(
-                {
-                    "AlbaranDef": "" if row["AlbaranDef"] is None else str(row["AlbaranDef"]),
-                    "Socio": "" if row["Socio"] is None else str(row["Socio"]),
-                    "Fcarga": fcarga_fmt,
-                    "Boleta": "" if row["Boleta"] is None else str(row["Boleta"]),
-                    "Plataforma": "" if row["Plataforma"] is None else str(row["Plataforma"]),
-                    "Empresa": "" if row["EMPRESA"] is None else str(row["EMPRESA"]),
-                    "Cultivo": "" if row["CULTIVO"] is None else str(row["CULTIVO"]),
-                    "Variedad": "" if row["Variedad"] is None else str(row["Variedad"]),
-                    "Restricciones": "" if row["Restricciones"] is None else str(row["Restricciones"]),
-                    "Color": "" if row["Color"] is None else str(row["Color"]),
-                    "KilosPendientes": kilos,
-                }
-            )
-        conn.close()
+                if isinstance(fcarga, str) and fcarga:
+                    try:
+                        dt = datetime.datetime.fromisoformat(fcarga)
+                        fcarga_fmt = dt.strftime("%d/%m/%Y")
+                    except Exception:
+                        fcarga_fmt = fcarga
+                else:
+                    fcarga_fmt = ""
+                data.append(
+                    {
+                        "AlbaranDef": "" if row["AlbaranDef"] is None else str(row["AlbaranDef"]),
+                        "Socio": "" if row["Socio"] is None else str(row["Socio"]),
+                        "Fcarga": fcarga_fmt,
+                        "Boleta": "" if row["Boleta"] is None else str(row["Boleta"]),
+                        "Plataforma": "" if row["Plataforma"] is None else str(row["Plataforma"]),
+                        "Empresa": "" if row["EMPRESA"] is None else str(row["EMPRESA"]),
+                        "Cultivo": "" if row["CULTIVO"] is None else str(row["CULTIVO"]),
+                        "Variedad": "" if row["Variedad"] is None else str(row["Variedad"]),
+                        "Restricciones": "" if row["Restricciones"] is None else str(row["Restricciones"]),
+                        "Color": "" if row["Color"] is None else str(row["Color"]),
+                        "KilosPendientes": kilos,
+                    }
+                )
+        finally:
+            conn.close()
         self._raw_rows = data
         return data
 
