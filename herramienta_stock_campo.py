@@ -353,6 +353,13 @@ class StockCampoWindow(BaseToolWindow):
             AND pi.IdPartida IS NULL
             AND p.Plataforma = 'SCA San Sebastian'
             AND p."CAMPAÑA" = {campaign_year}
+            AND p.CULTIVO NOT IN (
+                'DIRECTO',
+                'DIRECTOCHF',
+                'INDUSTRIA',
+                'VENTA',
+                'VENTACHF'
+            )
     """.format(campaign_year=campaign_year)
         return sql, []
 
