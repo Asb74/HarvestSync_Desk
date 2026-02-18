@@ -125,7 +125,7 @@ class StockCampoWindow(BaseToolWindow):
         frame_tabla.rowconfigure(0, weight=1)
         frame_tabla.columnconfigure(0, weight=1)
 
-        columns = ("Boleta", "Plataforma", "Empresa", "Cultivo", "Variedad", "Restricciones", "KilosPendientes")
+        columns = ("Fcarga", "Boleta", "Plataforma", "Empresa", "Cultivo", "Variedad", "Restricciones", "KilosPendientes")
         self.tree = ttk.Treeview(frame_tabla, columns=columns, show="headings", height=18)
         for col in columns:
             anchor = "e" if col == "KilosPendientes" else "w"
@@ -431,20 +431,23 @@ class StockCampoWindow(BaseToolWindow):
                 neto = 0.0 if row["Neto"] is None else float(row["Neto"])
                 kilos = neto_partida if neto_partida != 0 else neto
                 fcarga = row["Fcarga"]
+                fcarga_fmt = ""
+                fcarga_iso = None
 
-                if isinstance(fcarga, str) and fcarga:
+                if fcarga:
                     try:
-                        dt = datetime.datetime.fromisoformat(fcarga)
+                        dt = fcarga if isinstance(fcarga, datetime.datetime) else datetime.datetime.fromisoformat(str(fcarga))
                         fcarga_fmt = dt.strftime("%d/%m/%Y")
+                        fcarga_iso = dt.isoformat()
                     except Exception:
-                        fcarga_fmt = fcarga
-                else:
-                    fcarga_fmt = ""
+                        fcarga_fmt = ""
+                        fcarga_iso = None
                 data.append(
                     {
                         "AlbaranDef": "" if row["AlbaranDef"] is None else str(row["AlbaranDef"]),
                         "Socio": "" if row["Socio"] is None else str(row["Socio"]),
                         "Fcarga": fcarga_fmt,
+                        "FcargaRaw": fcarga_iso,
                         "Boleta": "" if row["Boleta"] is None else str(row["Boleta"]),
                         "Plataforma": "" if row["Plataforma"] is None else str(row["Plataforma"]),
                         "Empresa": "" if row["EMPRESA"] is None else str(row["EMPRESA"]),
@@ -481,6 +484,7 @@ class StockCampoWindow(BaseToolWindow):
     def _update_tree_headings_visual(self) -> None:
         base_headings = {
             "#0": "Detalle",
+            "Fcarga": "Fcarga",
             "Boleta": "Boleta",
             "Plataforma": "Plataforma",
             "Empresa": "Empresa",
@@ -501,6 +505,7 @@ class StockCampoWindow(BaseToolWindow):
         albaran_limpio = self._value_or_empty(albaran)
         sort_map = {
             "#0": albaran_limpio,
+            "Fcarga": row.get("FcargaRaw") or "",
             "Boleta": self._value_or_empty(row.get("Boleta")),
             "Plataforma": self._value_or_empty(row.get("Plataforma")),
             "Empresa": self._value_or_empty(row.get("Empresa")),
@@ -756,7 +761,7 @@ class StockCampoWindow(BaseToolWindow):
                 "",
                 "end",
                 text=cultivo,
-                values=("", "", "", "", "", "", self._format_kilos(cultivo_node["total"])),
+                values=("", "", "", "", "", "", "", self._format_kilos(cultivo_node["total"])),
                 open=True,
             )
             for variedad, variedad_node in cultivo_node["variedades"].items():
@@ -764,7 +769,7 @@ class StockCampoWindow(BaseToolWindow):
                     cultivo_iid,
                     "end",
                     text=variedad,
-                    values=("", "", "", "", "", "", self._format_kilos(variedad_node["total"])),
+                    values=("", "", "", "", "", "", "", self._format_kilos(variedad_node["total"])),
                     open=True,
                 )
                 for socio, socio_node in variedad_node["socios"].items():
@@ -772,7 +777,7 @@ class StockCampoWindow(BaseToolWindow):
                         variedad_iid,
                         "end",
                         text=socio,
-                        values=("", "", "", "", "", "", self._format_kilos(socio_node["total"])),
+                        values=("", "", "", "", "", "", "", self._format_kilos(socio_node["total"])),
                         open=True,
                     )
                     for albaran, row, kilos in sorted(
@@ -794,6 +799,7 @@ class StockCampoWindow(BaseToolWindow):
                             "end",
                             text=albaran,
                             values=(
+                                self._value_or_empty(row.get("Fcarga")),
                                 boleta,
                                 self._value_or_empty(row.get("Plataforma")),
                                 self._value_or_empty(row.get("Empresa")),
@@ -911,7 +917,7 @@ class StockCampoWindow(BaseToolWindow):
         )
 
         styles = getSampleStyleSheet()
-        header = ["Detalle", "Boleta", "Plataforma", "Empresa", "Cultivo", "Restricciones", "Neto"]
+        header = ["Detalle", "Fcarga", "Boleta", "Plataforma", "Empresa", "Cultivo", "Restricciones", "Neto"]
         table_data = [header]
         row_styles: list[tuple[int, str | None]] = []
         estructura, total_general = self._build_hierarchical_structure(self._rows)
@@ -921,6 +927,7 @@ class StockCampoWindow(BaseToolWindow):
             table_data.append(
                 [
                     f"CULTIVO: {cultivo}",
+                    "",
                     "",
                     "",
                     "",
@@ -941,6 +948,7 @@ class StockCampoWindow(BaseToolWindow):
                         "",
                         "",
                         "",
+                        "",
                         self._format_kilos(variedad_node["total"]),
                     ]
                 )
@@ -956,6 +964,7 @@ class StockCampoWindow(BaseToolWindow):
                             "",
                             "",
                             "",
+                            "",
                             self._format_kilos(socio_node["total"]),
                         ]
                     )
@@ -966,6 +975,7 @@ class StockCampoWindow(BaseToolWindow):
                         table_data.append(
                             [
                                 f"         {albaran}",
+                                self._value_or_empty(row.get("Fcarga")),
                                 boleta,
                                 self._value_or_empty(row.get("Plataforma")),
                                 self._value_or_empty(row.get("Empresa")),
@@ -979,7 +989,7 @@ class StockCampoWindow(BaseToolWindow):
 
         table = Table(
             table_data,
-            colWidths=[7.2 * cm, 2.8 * cm, 3.0 * cm, 3.0 * cm, 3.0 * cm, 6.0 * cm, 3.0 * cm],
+            colWidths=[5.8 * cm, 2.4 * cm, 2.4 * cm, 2.5 * cm, 2.8 * cm, 2.8 * cm, 5.8 * cm, 2.6 * cm],
             repeatRows=1,
         )
         style = TableStyle(
