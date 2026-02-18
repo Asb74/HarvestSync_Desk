@@ -321,6 +321,12 @@ class StockCampoWindow(BaseToolWindow):
         return conn
 
     def _construir_sql(self) -> tuple[str, list]:
+        today = datetime.date.today()
+        if today.month >= 9:
+            campaign_year = today.year + 1
+        else:
+            campaign_year = today.year
+
         sql = """
         SELECT
             p.AlbaranDef,
@@ -345,7 +351,9 @@ class StockCampoWindow(BaseToolWindow):
             p.AlbaranDef IS NOT NULL
             AND p.AlbaranDef <> ''
             AND pi.IdPartida IS NULL
-    """
+            AND p.Plataforma = 'SCA San Sebastian'
+            AND p."CAMPAÑA" = {campaign_year}
+    """.format(campaign_year=campaign_year)
         return sql, []
 
     def _obtener_ultima_actualizacion(self) -> str:
