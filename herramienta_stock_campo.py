@@ -24,7 +24,7 @@ from tkinter import messagebox, ttk
 from ui_utils import BaseToolWindow
 
 DB_FRUTA_PATH = r"X:\\BasesSQLite\\DBfruta.sqlite"
-DB_CALIDAD_PATH = r"X:\\BasesSQLite\\Partidas.BdCalidad.sqlite"
+DB_CALIDAD_PATH = r"X:\\BasesSQLite\\BdCalidad.sqlite"
 ACTUALIZACIONES_PATH = Path(r"X:\\BasesSQLite\\ultima_actualizacion.txt")
 
 
@@ -309,6 +309,15 @@ class StockCampoWindow(BaseToolWindow):
         conn.execute(
             f"ATTACH DATABASE '{DB_CALIDAD_PATH.replace('\\', '/')}' AS bdcalidad;"
         )
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM bdcalidad.sqlite_master "
+            "WHERE type='table' AND name='PartidasIndex'"
+        )
+        if cur.fetchone() is None:
+            raise RuntimeError(
+                f"No existe la tabla PartidasIndex en {DB_CALIDAD_PATH}"
+            )
         return conn
 
     def _construir_sql(self) -> tuple[str, list]:
