@@ -378,7 +378,7 @@ class StockCampoWindow(BaseToolWindow):
                 tb = traceback.format_exc()
                 self.after(
                     0,
-                    lambda: messagebox.showerror(
+                    lambda exc=exc, tb=tb: messagebox.showerror(
                         "Stock de Campo",
                         f"Error en el cálculo:\n\nEXCEPCIÓN: {repr(exc)}\n\nTRACEBACK COMPLETO:\n{tb}",
                     ),
