@@ -306,8 +306,9 @@ class StockCampoWindow(BaseToolWindow):
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON;")
         conn.execute("PRAGMA busy_timeout = 5000;")
+        db_path_attach = DB_CALIDAD_PATH.replace("\\", "/")
         conn.execute(
-            f"ATTACH DATABASE '{DB_CALIDAD_PATH.replace('\\', '/')}' AS bdcalidad;"
+            f"ATTACH DATABASE '{db_path_attach}' AS bdcalidad;"
         )
         cur = conn.cursor()
         cur.execute(
