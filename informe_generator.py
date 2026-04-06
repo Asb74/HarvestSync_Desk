@@ -120,12 +120,8 @@ def generar_pdf(id_muestra, cultivo, uid_usuario):
     usuario_doc = db.collection("UsuariosAutorizados").document(uid_usuario).get().to_dict()
     nombre_usuario = usuario_doc.get("Nombre", uid_usuario)
 
-    from urllib.parse import quote
-
     servidor_doc = db.collection("ServidorFotos").document("url_actual").get().to_dict()
     url_base = servidor_doc.get("url", "")
-    ruta_carpeta = servidor_doc.get("carpeta", "")
-    carpeta_codificada = quote(ruta_carpeta)
 
 
     # Agregar logo
@@ -176,31 +172,22 @@ def generar_pdf(id_muestra, cultivo, uid_usuario):
         else:
             elementos.append(Spacer(1, 12))
 
-        # Obtener ruta del servidor para query
-        config_doc = db.collection("ServidorFotos").document("confingSalida").get().to_dict()
-        if not config_doc:
-            raise ValueError("El documento 'configSalida' no existe o está vacío en la colección 'ServidorFotos'.")
-        ruta_servidor = config_doc.get("rutaservidor", "")
-        carpeta_encoded = requests.utils.quote(ruta_servidor)
-
-        print(f"🧾 Carpeta codificada: {carpeta_encoded}")
-
         fotos = db.collection("Fotos").where("idMuestra", "==", id_muestra).where("pantalla", "==", titulo).order_by("timestamp").stream()
         imagenes = []
         for foto_doc in fotos:
             ruta = foto_doc.to_dict().get("ruta_local", "")
-            if ruta.endswith(".jpg"):
-                url_completa = f"{url_base}/fotos/{ruta}?carpeta={carpeta_encoded}"
-                print(f"📷 Intentando descargar: {url_completa}")
+            if ruta and ruta.lower().endswith(".jpg"):
+                url_completa = f"{url_base}/fotos/{ruta}"
+                print(f"📷 URL final: {url_completa}")
                 try:
-                    resp = requests.get(url_completa)
+                    resp = requests.get(url_completa, timeout=5)
                     if resp.status_code == 200:
                         img = Image(io.BytesIO(resp.content), width=4 * cm, height=4 * cm)
                         imagenes.append(img)
                     else:
-                        print(f"❌ Error HTTP {resp.status_code} al descargar imagen.")
+                        print(f"❌ Error descargando imagen. URL: {url_completa} | HTTP: {resp.status_code}")
                 except Exception as e:
-                    print(f"❌ Excepción descargando imagen: {e}")
+                    print(f"❌ Excepción descargando imagen. URL: {url_completa} | Error: {e}")
 
         if imagenes:
             elementos.append(Spacer(1, 6))
