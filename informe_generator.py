@@ -1,5 +1,7 @@
 import io
 import requests
+from PIL import Image as PILImage
+from PIL import ImageOps
 from datetime import datetime
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -35,6 +37,25 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 styles = getSampleStyleSheet()
+
+
+def corregir_orientacion_imagen(image_bytes):
+    """
+    Corrige la orientación EXIF de una imagen y devuelve un buffer listo para ReportLab.
+    Si ocurre algún error, devuelve la imagen original sin interrumpir el flujo.
+    """
+    try:
+        with PILImage.open(io.BytesIO(image_bytes)) as image:
+            image_corregida = ImageOps.exif_transpose(image)
+            output = io.BytesIO()
+            formato = image_corregida.format or image.format or "JPEG"
+            if formato.upper() == "JPEG" and image_corregida.mode in ("RGBA", "LA", "P"):
+                image_corregida = image_corregida.convert("RGB")
+            image_corregida.save(output, format=formato)
+            output.seek(0)
+            return output
+    except Exception:
+        return io.BytesIO(image_bytes)
 
 
 def _es_grafica_posible(filas):
@@ -182,7 +203,8 @@ def generar_pdf(id_muestra, cultivo, uid_usuario):
                 try:
                     resp = requests.get(url_completa, timeout=5)
                     if resp.status_code == 200:
-                        img = Image(io.BytesIO(resp.content), width=4 * cm, height=4 * cm)
+                        imagen_buffer = corregir_orientacion_imagen(resp.content)
+                        img = Image(imagen_buffer, width=4 * cm, height=4 * cm)
                         imagenes.append(img)
                     else:
                         print(f"❌ Error descargando imagen. URL: {url_completa} | HTTP: {resp.status_code}")
