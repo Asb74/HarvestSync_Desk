@@ -7,6 +7,7 @@ from firebase_admin import firestore
 
 from herramienta_actualizar_efectivo import abrir_actualizar_efectivo
 from herramienta_stock_campo import abrir_stock_campo
+from herramienta_configuracion_calibres import abrir_configuracion_calibres
 from ui_utils import aplicar_icono_principal
 
 
@@ -42,6 +43,13 @@ class HerramientasWindow(tk.Toplevel):
             text="🌱 Stock de Campo",
             command=lambda: abrir_stock_campo(self, self.db),
         ).pack(fill="x", pady=4)
+
+        ttk.Button(
+            contenedor,
+            text="⚙️ Configuración calibres",
+            command=lambda: abrir_configuracion_calibres(self, self.db),
+        ).pack(fill="x", pady=4)
+
 
     def _apply_master_icon(self, master: tk.Widget) -> None:
         """Hereda el icono global configurado en la ventana principal."""
