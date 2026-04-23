@@ -15,7 +15,12 @@ from firebase_admin import firestore
 from tkinter import messagebox, ttk
 
 from ui_utils import BaseToolWindow
-from calibres_vision import CircleDetectionResult, CirclePatternDetector
+from calibres_vision import (
+    CircleDetectionResult,
+    CirclePatternDetector,
+    FruitCaliberAnalyzer,
+    PhotoFruitAnalysisResult,
+)
 
 try:
     from PIL import Image, ImageOps, ImageTk
@@ -168,8 +173,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._deteccion_resultados: dict[str, CircleDetectionResult] = {}
         self._detector: CirclePatternDetector | None = None
         self._overlay_paths_by_foto: dict[str, str] = {}
+        self._frutos_resultados: dict[str, PhotoFruitAnalysisResult] = {}
+        self._frutos_overlay_paths_by_foto: dict[str, str] = {}
         self._overlay_dir = Path(tempfile.gettempdir()) / "harvestsync_desk" / "calibres_overlays"
         self._overlay_dir.mkdir(parents=True, exist_ok=True)
+        self._fruit_analyzer = FruitCaliberAnalyzer()
 
         self._build_ui()
         self._cargar_configuracion()
@@ -249,7 +257,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ttk.Button(toolbar, text="Deseleccionar todas", command=self._deseleccionar_todas).grid(row=0, column=1, padx=(0, 6))
         ttk.Button(toolbar, text="Invertir selección", command=self._invertir_seleccion).grid(row=0, column=2, padx=(0, 6))
         ttk.Button(toolbar, text="🎯 Detectar patrón", command=self._detectar_patron_y_escala).grid(row=0, column=3, padx=(0, 6))
-        ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=4, sticky="e")
+        ttk.Button(toolbar, text="🍊 Analizar frutos", command=self._analizar_frutos).grid(row=0, column=4, padx=(0, 6))
+        ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=5, sticky="e")
 
         self.resumen_fotos_var = tk.StringVar(value="Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
         ttk.Label(frame_fotos, textvariable=self.resumen_fotos_var, foreground="#34495e").grid(row=1, column=0, sticky="w", pady=(0, 6))
@@ -297,6 +306,32 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.frame_fotos_content.bind("<Configure>", lambda _: self.canvas_fotos.configure(scrollregion=self.canvas_fotos.bbox("all")))
         self.canvas_fotos.bind("<Configure>", self._sync_fotos_width)
 
+        frutos = ttk.LabelFrame(frame_fotos, text="5) Estimación prudente de frutos por calibre", padding=6)
+        frutos.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        frutos.columnconfigure(0, weight=1)
+
+        self.tree_frutos_foto = ttk.Treeview(
+            frutos,
+            columns=("id_foto", "detectados", "validos", "descartados", "descarte_pct", "estado"),
+            show="headings",
+            height=4,
+        )
+        headers_frutos = {
+            "id_foto": "Foto",
+            "detectados": "Detectados",
+            "validos": "Válidos",
+            "descartados": "Descartados",
+            "descarte_pct": "% descarte",
+            "estado": "Estado",
+        }
+        widths_frutos = {"id_foto": 180, "detectados": 90, "validos": 80, "descartados": 95, "descarte_pct": 95, "estado": 340}
+        for col in headers_frutos:
+            self.tree_frutos_foto.heading(col, text=headers_frutos[col])
+            self.tree_frutos_foto.column(col, width=widths_frutos[col], anchor="w")
+        self.tree_frutos_foto.grid(row=0, column=0, sticky="ew")
+        self.tree_frutos_foto.bind("<Double-1>", self._abrir_overlay_frutos_actual)
+        ttk.Button(frutos, text="👁 Ver overlay frutos", command=self._abrir_overlay_frutos_actual).grid(row=1, column=0, sticky="e", pady=(6, 0))
+
     def _sync_fotos_width(self, event: tk.Event) -> None:
         self.canvas_fotos.itemconfigure(self._fotos_window, width=event.width)
 
@@ -327,7 +362,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._analysis_payload = {}
         self._deteccion_resultados = {}
         self._overlay_paths_by_foto = {}
+        self._frutos_resultados = {}
+        self._frutos_overlay_paths_by_foto = {}
         self._limpiar_resultados_deteccion()
+        self._limpiar_resultados_frutos()
 
         def worker() -> None:
             try:
@@ -407,7 +445,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._limpiar_fotos()
         self._deteccion_resultados = {}
         self._overlay_paths_by_foto = {}
+        self._frutos_resultados = {}
+        self._frutos_overlay_paths_by_foto = {}
         self._limpiar_resultados_deteccion()
+        self._limpiar_resultados_frutos()
         self._current_muestra_id = id_muestra
         self._current_cards = []
         fotos = self._fotos_by_muestra.get(id_muestra, [])
@@ -505,6 +546,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
     def _limpiar_resultados_deteccion(self) -> None:
         for item in self.tree_resultados.get_children(""):
             self.tree_resultados.delete(item)
+
+    def _limpiar_resultados_frutos(self) -> None:
+        for item in self.tree_frutos_foto.get_children(""):
+            self.tree_frutos_foto.delete(item)
 
     def _detectar_patron_y_escala(self) -> None:
         selected = self.tree_muestras.selection()
@@ -634,6 +679,124 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ttk.Label(cont, text=image_path, foreground="#1b4f72", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(6, 0))
         self._fullsize_refs.append(photo)
 
+    def _analizar_frutos(self) -> None:
+        selected = self.tree_muestras.selection()
+        if not selected:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para analizar frutos.", parent=self)
+            return
+
+        id_muestra = selected[0]
+        ids_seleccionadas = self._selected_fotos_by_muestra.get(id_muestra, set())
+        if not ids_seleccionadas:
+            messagebox.showwarning("Obtención calibres", "No hay fotos seleccionadas para análisis de frutos.", parent=self)
+            return
+        if not self._deteccion_resultados:
+            messagebox.showwarning("Obtención calibres", "Ejecute primero la detección de patrón para obtener mm/px.", parent=self)
+            return
+
+        muestra = next((item for item in self._muestras if item["id_muestra"] == id_muestra), None)
+        cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
+        rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
+        cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+
+        self.estado_var.set("Analizando frutos y clasificando por calibre...")
+
+        def worker() -> None:
+            resultados: dict[str, PhotoFruitAnalysisResult] = {}
+            overlays: dict[str, str] = {}
+            for id_foto in sorted(ids_seleccionadas):
+                escala = self._deteccion_resultados.get(id_foto)
+                card = cards_by_id.get(id_foto)
+                if escala is None or not escala.valid_for_next_step or escala.mm_per_pixel is None:
+                    resultados[id_foto] = PhotoFruitAnalysisResult(
+                        image_id=id_foto,
+                        photo_valid_for_phase=False,
+                        fruits=[],
+                        caliber_count={},
+                        caliber_percentage={},
+                        discard_percentage=100.0,
+                        error="Foto sin calibración válida (patrón/mm-px).",
+                    )
+                    continue
+                if not card:
+                    resultados[id_foto] = PhotoFruitAnalysisResult(
+                        image_id=id_foto,
+                        photo_valid_for_phase=False,
+                        fruits=[],
+                        caliber_count={},
+                        caliber_percentage={},
+                        discard_percentage=100.0,
+                        error="Foto no disponible en memoria.",
+                    )
+                    continue
+                result = self._fruit_analyzer.analyze_photo(
+                    image_id=id_foto,
+                    raw_image=card.get("raw") or b"",
+                    mm_per_pixel=escala.mm_per_pixel,
+                    caliber_ranges=rangos,
+                )
+                resultados[id_foto] = result
+                overlay = self._save_fruit_overlay_image(id_foto, card.get("raw") or b"", result)
+                if overlay:
+                    overlays[id_foto] = overlay
+            self.after(0, lambda: self._on_analisis_frutos_done(resultados, overlays))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _save_fruit_overlay_image(self, id_foto: str, raw_image: bytes, result: PhotoFruitAnalysisResult) -> str | None:
+        overlay_bytes = self._fruit_analyzer.build_overlay_bytes(raw_image, result)
+        if not overlay_bytes:
+            return None
+        safe_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in id_foto) or "foto"
+        path = self._overlay_dir / f"{safe_id}_frutos_overlay.png"
+        try:
+            path.write_bytes(overlay_bytes)
+            return str(path)
+        except Exception:
+            return None
+
+    def _on_analisis_frutos_done(self, resultados: dict[str, PhotoFruitAnalysisResult], overlays: dict[str, str]) -> None:
+        self._frutos_resultados = resultados
+        self._frutos_overlay_paths_by_foto = overlays
+        self._pintar_resultados_frutos()
+
+    def _pintar_resultados_frutos(self) -> None:
+        self._limpiar_resultados_frutos()
+        total = len(self._frutos_resultados)
+        validas_foto = 0
+        total_validos = 0
+        total_descartados = 0
+        for id_foto in sorted(self._frutos_resultados.keys()):
+            res = self._frutos_resultados[id_foto]
+            detectados = len(res.fruits)
+            validos = len([item for item in res.fruits if item.valid])
+            descartados = max(detectados - validos, 0)
+            total_validos += validos
+            total_descartados += descartados
+            validas_foto += 1 if res.photo_valid_for_phase else 0
+            estado = "OK" if res.photo_valid_for_phase else (res.error or "Inválida")
+            self.tree_frutos_foto.insert(
+                "",
+                "end",
+                iid=id_foto,
+                values=(id_foto, detectados, validos, descartados, f"{res.discard_percentage:.2f}", estado),
+            )
+        self.estado_var.set(
+            f"Análisis frutos: fotos={total}, fotos válidas={validas_foto}, frutos válidos={total_validos}, descartados={total_descartados}."
+        )
+
+    def _abrir_overlay_frutos_actual(self, _: tk.Event | None = None) -> None:
+        selected = self.tree_frutos_foto.selection()
+        if not selected:
+            messagebox.showinfo("Obtención calibres", "Seleccione una fila de frutos para abrir el overlay.", parent=self)
+            return
+        id_foto = selected[0]
+        path = self._frutos_overlay_paths_by_foto.get(id_foto)
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("Obtención calibres", "No hay overlay de frutos para esta foto.", parent=self)
+            return
+        self._abrir_vista_ampliada_desde_archivo(path, id_foto)
+
     def _preparar_analisis(self) -> None:
         selected = self.tree_muestras.selection()
         if not selected:
@@ -691,6 +854,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 resultados[id_foto].to_dict()
                 for id_foto in sorted(resultados.keys())
             ],
+            "analisis_frutos_por_foto": [
+                self._frutos_resultados[id_foto].to_dict()
+                for id_foto in sorted(self._frutos_resultados.keys())
+                if id_foto in ids_seleccionadas
+            ],
         }
 
         invalidas = len(resultados) - len(fotos_validas)
@@ -721,6 +889,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
         else:
             seleccionadas.discard(id_foto)
         self._deteccion_resultados.pop(id_foto, None)
+        self._frutos_resultados.pop(id_foto, None)
+        self._frutos_overlay_paths_by_foto.pop(id_foto, None)
+        self._pintar_resultados_frutos()
         self._actualizar_resumen_fotos()
 
     def _actualizar_resumen_fotos(self) -> None:
@@ -742,7 +913,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
             str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")
         }
         self._deteccion_resultados = {}
+        self._frutos_resultados = {}
+        self._frutos_overlay_paths_by_foto = {}
         self._limpiar_resultados_deteccion()
+        self._limpiar_resultados_frutos()
         self._render_cards(self._current_cards)
 
     def _deseleccionar_todas(self) -> None:
@@ -750,7 +924,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return
         self._selected_fotos_by_muestra[self._current_muestra_id] = set()
         self._deteccion_resultados = {}
+        self._frutos_resultados = {}
+        self._frutos_overlay_paths_by_foto = {}
         self._limpiar_resultados_deteccion()
+        self._limpiar_resultados_frutos()
         self._render_cards(self._current_cards)
 
     def _invertir_seleccion(self) -> None:
@@ -761,7 +938,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         actuales = self._selected_fotos_by_muestra.get(self._current_muestra_id, set())
         self._selected_fotos_by_muestra[self._current_muestra_id] = todos.difference(actuales)
         self._deteccion_resultados = {}
+        self._frutos_resultados = {}
+        self._frutos_overlay_paths_by_foto = {}
         self._limpiar_resultados_deteccion()
+        self._limpiar_resultados_frutos()
         self._render_cards(self._current_cards)
 
     def _abrir_vista_ampliada(self, card: dict[str, Any]) -> None:
