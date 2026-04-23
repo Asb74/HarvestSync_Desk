@@ -6,3 +6,5 @@ pandas
 firebase_admin
 google-cloud-firestore
 pyinstaller
+numpy
+opencv-python

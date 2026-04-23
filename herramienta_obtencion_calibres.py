@@ -12,6 +12,7 @@ from firebase_admin import firestore
 from tkinter import messagebox, ttk
 
 from ui_utils import BaseToolWindow
+from calibres_vision import CircleDetectionResult, CirclePatternDetector
 
 try:
     from PIL import Image, ImageOps, ImageTk
@@ -161,6 +162,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._preview_refs: list[Any] = []
         self._fullsize_refs: list[Any] = []
         self._analysis_payload: dict[str, Any] = {}
+        self._deteccion_resultados: dict[str, CircleDetectionResult] = {}
+        self._detector: CirclePatternDetector | None = None
 
         self._build_ui()
         self._cargar_configuracion()
@@ -239,10 +242,34 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ttk.Button(toolbar, text="Seleccionar todas", command=self._seleccionar_todas).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(toolbar, text="Deseleccionar todas", command=self._deseleccionar_todas).grid(row=0, column=1, padx=(0, 6))
         ttk.Button(toolbar, text="Invertir selección", command=self._invertir_seleccion).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(toolbar, text="🎯 Detectar patrón", command=self._detectar_patron_y_escala).grid(row=0, column=3, padx=(0, 6))
         ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=4, sticky="e")
 
         self.resumen_fotos_var = tk.StringVar(value="Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
         ttk.Label(frame_fotos, textvariable=self.resumen_fotos_var, foreground="#34495e").grid(row=1, column=0, sticky="w", pady=(0, 6))
+
+        resultados = ttk.LabelFrame(frame_fotos, text="4) Detección patrón y escala", padding=6)
+        resultados.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        resultados.columnconfigure(0, weight=1)
+
+        self.tree_resultados = ttk.Treeview(
+            resultados,
+            columns=("id_foto", "detectado", "diametro_px", "mm_px", "valida"),
+            show="headings",
+            height=5,
+        )
+        headers = {
+            "id_foto": "Foto",
+            "detectado": "Patrón",
+            "diametro_px": "Diámetro (px)",
+            "mm_px": "mm/px",
+            "valida": "Válida",
+        }
+        widths = {"id_foto": 200, "detectado": 90, "diametro_px": 120, "mm_px": 120, "valida": 80}
+        for col in headers:
+            self.tree_resultados.heading(col, text=headers[col])
+            self.tree_resultados.column(col, width=widths[col], anchor="w")
+        self.tree_resultados.grid(row=0, column=0, sticky="ew")
 
         self.canvas_fotos = tk.Canvas(frame_fotos, highlightthickness=0)
         self.canvas_fotos.grid(row=3, column=0, sticky="nsew")
@@ -268,6 +295,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         self.pantalla_var.set(self._config.pantalla_fotos)
         self.diametro_var.set(f"{self._config.diametro_patron_mm:.2f}")
+        self._detector = CirclePatternDetector(self._config.diametro_patron_mm)
 
     def _buscar_boleta(self) -> None:
         boleta = self.boleta_var.get().strip()
@@ -283,6 +311,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._current_muestra_id = None
         self._current_cards = []
         self._analysis_payload = {}
+        self._deteccion_resultados = {}
+        self._limpiar_resultados_deteccion()
 
         def worker() -> None:
             try:
@@ -360,6 +390,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
     def _render_fotos_muestra(self, id_muestra: str) -> None:
         self._limpiar_fotos()
+        self._deteccion_resultados = {}
+        self._limpiar_resultados_deteccion()
         self._current_muestra_id = id_muestra
         self._current_cards = []
         fotos = self._fotos_by_muestra.get(id_muestra, [])
@@ -454,6 +486,59 @@ class ObtencionCalibresWindow(BaseToolWindow):
         except Exception:
             return None
 
+    def _limpiar_resultados_deteccion(self) -> None:
+        for item in self.tree_resultados.get_children(""):
+            self.tree_resultados.delete(item)
+
+    def _detectar_patron_y_escala(self) -> None:
+        selected = self.tree_muestras.selection()
+        if not selected:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para detectar patrón.", parent=self)
+            return
+        if self._detector is None:
+            messagebox.showerror("Obtención calibres", "No hay configuración cargada para detección.", parent=self)
+            return
+
+        id_muestra = selected[0]
+        ids_seleccionadas = self._selected_fotos_by_muestra.get(id_muestra, set())
+        if not ids_seleccionadas:
+            messagebox.showwarning("Obtención calibres", "No hay fotos seleccionadas para detección.", parent=self)
+            return
+
+        cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+        resultados: dict[str, CircleDetectionResult] = {}
+        for id_foto in ids_seleccionadas:
+            card = cards_by_id.get(id_foto)
+            if not card:
+                resultados[id_foto] = CircleDetectionResult(
+                    image_id=id_foto,
+                    detected=False,
+                    diameter_px=None,
+                    mm_per_pixel=None,
+                    valid_for_next_step=False,
+                    error="La foto no está cargada en memoria para procesar.",
+                )
+                continue
+            resultados[id_foto] = self._detector.detect_from_bytes(id_foto, card.get("raw") or b"")
+
+        self._deteccion_resultados = resultados
+        self._pintar_resultados_deteccion(resultados)
+
+    def _pintar_resultados_deteccion(self, resultados: dict[str, CircleDetectionResult]) -> None:
+        self._limpiar_resultados_deteccion()
+        total = len(resultados)
+        validas = 0
+        for id_foto in sorted(resultados.keys()):
+            res = resultados[id_foto]
+            validas += 1 if res.valid_for_next_step else 0
+            diametro = f"{res.diameter_px:.2f}" if res.diameter_px is not None else "-"
+            mm_px = f"{res.mm_per_pixel:.5f}" if res.mm_per_pixel is not None else "-"
+            detectado = "Sí" if res.detected else "No"
+            valida = "Sí" if res.valid_for_next_step else "No"
+            self.tree_resultados.insert("", "end", values=(id_foto, detectado, diametro, mm_px, valida))
+        invalidas = max(total - validas, 0)
+        self.estado_var.set(f"Detección ejecutada: {total} imagen(es), válidas={validas}, inválidas={invalidas}.")
+
     def _preparar_analisis(self) -> None:
         selected = self.tree_muestras.selection()
         if not selected:
@@ -482,22 +567,46 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
             return
 
+        if not self._deteccion_resultados:
+            self._detectar_patron_y_escala()
+
+        resultados = {k: v for k, v in self._deteccion_resultados.items() if k in ids_seleccionadas}
+        fotos_validas = [
+            foto
+            for foto in fotos_seleccionadas
+            if resultados.get(str(foto.get("id_foto", ""))) and resultados[str(foto.get("id_foto", ""))].valid_for_next_step
+        ]
+
+        if not fotos_validas:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "Ninguna foto seleccionada pasó la detección del patrón. Ajuste selección o condiciones de captura.",
+                parent=self,
+            )
+            return
+
         self._analysis_payload = {
             "id_muestra": id_muestra,
             "boleta": muestra.get("boleta", ""),
             "cultivo": cultivo,
             "diametro_patron_mm": self._config.diametro_patron_mm if self._config else 94.0,
             "rangos": rangos,
-            "fotos": fotos_seleccionadas,
+            "fotos": fotos_validas,
+            "calibracion_imagenes": [
+                resultados[id_foto].to_dict()
+                for id_foto in sorted(resultados.keys())
+            ],
         }
 
+        invalidas = len(resultados) - len(fotos_validas)
         messagebox.showinfo(
             "Obtención calibres",
             (
                 "Preparación lista para análisis de calibres.\n\n"
                 f"Muestra: {id_muestra}\n"
                 f"Cultivo: {cultivo or '-'}\n"
-                f"Fotos: {len(self._analysis_payload['fotos'])}\n"
+                f"Fotos válidas: {len(self._analysis_payload['fotos'])}\n"
+                f"Fotos inválidas: {invalidas}\n"
                 f"Diámetro patrón: {self._analysis_payload['diametro_patron_mm']:.2f} mm\n"
                 f"Rangos configurados: {len(rangos)}"
             ),
@@ -516,6 +625,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             seleccionadas.add(id_foto)
         else:
             seleccionadas.discard(id_foto)
+        self._deteccion_resultados.pop(id_foto, None)
         self._actualizar_resumen_fotos()
 
     def _actualizar_resumen_fotos(self) -> None:
@@ -536,12 +646,16 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._selected_fotos_by_muestra[self._current_muestra_id] = {
             str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")
         }
+        self._deteccion_resultados = {}
+        self._limpiar_resultados_deteccion()
         self._render_cards(self._current_cards)
 
     def _deseleccionar_todas(self) -> None:
         if not self._current_muestra_id:
             return
         self._selected_fotos_by_muestra[self._current_muestra_id] = set()
+        self._deteccion_resultados = {}
+        self._limpiar_resultados_deteccion()
         self._render_cards(self._current_cards)
 
     def _invertir_seleccion(self) -> None:
@@ -551,6 +665,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         todos = {str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")}
         actuales = self._selected_fotos_by_muestra.get(self._current_muestra_id, set())
         self._selected_fotos_by_muestra[self._current_muestra_id] = todos.difference(actuales)
+        self._deteccion_resultados = {}
+        self._limpiar_resultados_deteccion()
         self._render_cards(self._current_cards)
 
     def _abrir_vista_ampliada(self, card: dict[str, Any]) -> None:
