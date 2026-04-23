@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import io
+import os
+import tempfile
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -164,6 +167,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._analysis_payload: dict[str, Any] = {}
         self._deteccion_resultados: dict[str, CircleDetectionResult] = {}
         self._detector: CirclePatternDetector | None = None
+        self._overlay_paths_by_foto: dict[str, str] = {}
+        self._overlay_dir = Path(tempfile.gettempdir()) / "harvestsync_desk" / "calibres_overlays"
+        self._overlay_dir.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
         self._cargar_configuracion()
@@ -254,7 +260,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         self.tree_resultados = ttk.Treeview(
             resultados,
-            columns=("id_foto", "detectado", "diametro_px", "mm_px", "valida"),
+            columns=("id_foto", "detectado", "diametro_px", "mm_px", "valida", "estado"),
             show="headings",
             height=5,
         )
@@ -264,12 +270,20 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "diametro_px": "Diámetro (px)",
             "mm_px": "mm/px",
             "valida": "Válida",
+            "estado": "Estado",
         }
-        widths = {"id_foto": 200, "detectado": 90, "diametro_px": 120, "mm_px": 120, "valida": 80}
+        widths = {"id_foto": 190, "detectado": 80, "diametro_px": 110, "mm_px": 110, "valida": 70, "estado": 330}
         for col in headers:
             self.tree_resultados.heading(col, text=headers[col])
             self.tree_resultados.column(col, width=widths[col], anchor="w")
         self.tree_resultados.grid(row=0, column=0, sticky="ew")
+        self.tree_resultados.bind("<Double-1>", self._on_double_click_resultado)
+        ttk.Button(resultados, text="👁 Ver validación visual", command=self._abrir_overlay_resultado_actual).grid(
+            row=1,
+            column=0,
+            sticky="e",
+            pady=(6, 0),
+        )
 
         self.canvas_fotos = tk.Canvas(frame_fotos, highlightthickness=0)
         self.canvas_fotos.grid(row=3, column=0, sticky="nsew")
@@ -312,6 +326,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._current_cards = []
         self._analysis_payload = {}
         self._deteccion_resultados = {}
+        self._overlay_paths_by_foto = {}
         self._limpiar_resultados_deteccion()
 
         def worker() -> None:
@@ -391,6 +406,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
     def _render_fotos_muestra(self, id_muestra: str) -> None:
         self._limpiar_fotos()
         self._deteccion_resultados = {}
+        self._overlay_paths_by_foto = {}
         self._limpiar_resultados_deteccion()
         self._current_muestra_id = id_muestra
         self._current_cards = []
@@ -506,23 +522,52 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return
 
         cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
-        resultados: dict[str, CircleDetectionResult] = {}
-        for id_foto in ids_seleccionadas:
-            card = cards_by_id.get(id_foto)
-            if not card:
-                resultados[id_foto] = CircleDetectionResult(
-                    image_id=id_foto,
-                    detected=False,
-                    diameter_px=None,
-                    mm_per_pixel=None,
-                    valid_for_next_step=False,
-                    error="La foto no está cargada en memoria para procesar.",
-                )
-                continue
-            resultados[id_foto] = self._detector.detect_from_bytes(id_foto, card.get("raw") or b"")
+        self.estado_var.set(f"Ejecutando detección sobre {len(ids_seleccionadas)} imagen(es)...")
 
+        def worker() -> None:
+            resultados: dict[str, CircleDetectionResult] = {}
+            overlays: dict[str, str] = {}
+            for id_foto in sorted(ids_seleccionadas):
+                card = cards_by_id.get(id_foto)
+                if not card:
+                    resultados[id_foto] = CircleDetectionResult(
+                        image_id=id_foto,
+                        detected=False,
+                        diameter_px=None,
+                        mm_per_pixel=None,
+                        valid_for_next_step=False,
+                        error="La foto no está cargada en memoria para procesar.",
+                    )
+                    continue
+
+                result = self._detector.detect_from_bytes(id_foto, card.get("raw") or b"")
+                resultados[id_foto] = result
+                overlay_path = self._save_overlay_image(id_foto, card.get("raw") or b"", result)
+                if overlay_path:
+                    overlays[id_foto] = overlay_path
+
+            self.after(0, lambda: self._on_detection_done(resultados, overlays))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_detection_done(self, resultados: dict[str, CircleDetectionResult], overlays: dict[str, str]) -> None:
         self._deteccion_resultados = resultados
+        self._overlay_paths_by_foto = overlays
         self._pintar_resultados_deteccion(resultados)
+
+    def _save_overlay_image(self, id_foto: str, raw_image: bytes, result: CircleDetectionResult) -> str | None:
+        if self._detector is None:
+            return None
+        overlay_bytes = self._detector.build_overlay_bytes(raw_image, result)
+        if not overlay_bytes:
+            return None
+        safe_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in id_foto) or "foto"
+        path = self._overlay_dir / f"{safe_id}_overlay.png"
+        try:
+            path.write_bytes(overlay_bytes)
+            return str(path)
+        except Exception:
+            return None
 
     def _pintar_resultados_deteccion(self, resultados: dict[str, CircleDetectionResult]) -> None:
         self._limpiar_resultados_deteccion()
@@ -535,9 +580,59 @@ class ObtencionCalibresWindow(BaseToolWindow):
             mm_px = f"{res.mm_per_pixel:.5f}" if res.mm_per_pixel is not None else "-"
             detectado = "Sí" if res.detected else "No"
             valida = "Sí" if res.valid_for_next_step else "No"
-            self.tree_resultados.insert("", "end", values=(id_foto, detectado, diametro, mm_px, valida))
+            estado = "OK" if res.detected else (res.error or "Sin patrón")
+            self.tree_resultados.insert("", "end", iid=id_foto, values=(id_foto, detectado, diametro, mm_px, valida, estado))
         invalidas = max(total - validas, 0)
         self.estado_var.set(f"Detección ejecutada: {total} imagen(es), válidas={validas}, inválidas={invalidas}.")
+
+    def _on_double_click_resultado(self, _: tk.Event) -> None:
+        self._abrir_overlay_resultado_actual()
+
+    def _abrir_overlay_resultado_actual(self) -> None:
+        selected = self.tree_resultados.selection()
+        if not selected:
+            messagebox.showinfo("Obtención calibres", "Seleccione un resultado para abrir validación visual.", parent=self)
+            return
+        id_foto = selected[0]
+        path = self._overlay_paths_by_foto.get(id_foto)
+        if not path or not os.path.exists(path):
+            messagebox.showwarning(
+                "Obtención calibres",
+                "No hay overlay disponible para esta foto. Vuelva a ejecutar detección.",
+                parent=self,
+            )
+            return
+        self._abrir_vista_ampliada_desde_archivo(path, id_foto)
+
+    def _abrir_vista_ampliada_desde_archivo(self, image_path: str, id_foto: str) -> None:
+        if Image is None or ImageTk is None:
+            messagebox.showinfo("Obtención calibres", "PIL no disponible para abrir la validación visual.", parent=self)
+            return
+
+        try:
+            with Image.open(image_path) as img:
+                if ImageOps is not None:
+                    img = ImageOps.exif_transpose(img)
+                ancho, alto = img.size
+                max_w, max_h = 1100, 800
+                escala = min(max_w / max(ancho, 1), max_h / max(alto, 1), 1.0)
+                nuevo_size = (max(int(ancho * escala), 1), max(int(alto * escala), 1))
+                if nuevo_size != img.size:
+                    img = img.resize(nuevo_size)
+                photo = ImageTk.PhotoImage(img.copy())
+        except Exception:
+            messagebox.showerror("Obtención calibres", "No fue posible abrir la validación visual.", parent=self)
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Validación patrón - {id_foto}")
+        cont = ttk.Frame(win, padding=8)
+        cont.grid(row=0, column=0, sticky="nsew")
+        win.rowconfigure(0, weight=1)
+        win.columnconfigure(0, weight=1)
+        ttk.Label(cont, image=photo).grid(row=0, column=0, sticky="nsew")
+        ttk.Label(cont, text=image_path, foreground="#1b4f72", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._fullsize_refs.append(photo)
 
     def _preparar_analisis(self) -> None:
         selected = self.tree_muestras.selection()
