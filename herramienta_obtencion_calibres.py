@@ -7,6 +7,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -953,6 +954,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
             return
 
+        image_path_for_ai, mapping_warning = self._resolve_image_path_for_ai(ruta_local)
+        if mapping_warning:
+            LOGGER.warning("Validación IA: %s", mapping_warning)
+
         service_url, source, resolve_error = self.data_service.resolve_url_servicio_ia()
         if not service_url:
             LOGGER.error("Validación IA: URL de servicio no resuelta. source=%s error=%s", source, resolve_error)
@@ -966,26 +971,46 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 parent=self,
             )
             return
+        LOGGER.info(
+            "Validación IA: preparado request. service_url=%s source=%s id_foto=%s ruta_local=%s image_path_enviado=%s",
+            service_url,
+            source,
+            id_foto,
+            ruta_local,
+            image_path_for_ai,
+        )
 
         self._ai_validacion_en_curso = True
         self.btn_validacion_ia.config(state="disabled")
         self.estado_var.set(f"Validación IA en curso para foto {id_foto}...")
+        timeout_seconds = 25
 
         def worker() -> None:
+            t0 = time.perf_counter()
+            LOGGER.info(
+                "Validación IA: inicio llamada. id_foto=%s endpoint=%s/analyze-image timeout=%ss image_path=%s",
+                id_foto,
+                service_url.rstrip("/"),
+                timeout_seconds,
+                image_path_for_ai,
+            )
             try:
                 result = call_analyze_image(
                     server_url=service_url,
-                    image_path=ruta_local,
+                    image_path=image_path_for_ai,
                     task="validacion_foto",
                     context=(
                         "Evaluar utilidad de imagen para calibres: "
                         "visibilidad general, oclusión, nitidez y presencia/claridad del patrón."
                     ),
-                    timeout_seconds=20,
+                    timeout_seconds=timeout_seconds,
                 )
-                self.after(0, lambda: self._on_validacion_ia_ok(id_foto=id_foto, image_path=ruta_local, result=result))
+                elapsed = time.perf_counter() - t0
+                LOGGER.info("Validación IA: fin correcto. id_foto=%s duracion=%.2fs", id_foto, elapsed)
+                self.after(0, lambda: self._on_validacion_ia_ok(id_foto=id_foto, image_path=image_path_for_ai, result=result))
             except InternalAIClientError as exc:
-                LOGGER.error("Validación IA: error del servicio interno. %s", exc)
+                elapsed = time.perf_counter() - t0
+                LOGGER.error("Validación IA: error del servicio interno. id_foto=%s duracion=%.2fs error=%s", id_foto, elapsed, exc)
                 self.after(0, lambda: self._on_validacion_ia_error(str(exc)))
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("Validación IA: error inesperado en llamada al servicio.")
@@ -1004,6 +1029,25 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.btn_validacion_ia.config(state="normal")
         self.estado_var.set("Validación IA con error.")
         messagebox.showerror("Obtención calibres - Validación IA", error_message, parent=self)
+
+    def _resolve_image_path_for_ai(self, ruta_local: str) -> tuple[str, str | None]:
+        """Devuelve image_path a enviar al servicio IA con diagnóstico de mapeo."""
+        candidate = Path(ruta_local)
+        if candidate.is_absolute():
+            return str(candidate), None
+
+        image_root = os.getenv("HARVESTSYNC_AI_IMAGE_ROOT", "").strip()
+        if image_root:
+            mapped = Path(image_root) / ruta_local.lstrip("/\\")
+            return str(mapped), (
+                "ruta_local no es absoluta; se mapea con HARVESTSYNC_AI_IMAGE_ROOT "
+                f"({image_root}) -> {mapped}"
+            )
+
+        return ruta_local, (
+            "ruta_local no es absoluta y no hay HARVESTSYNC_AI_IMAGE_ROOT. "
+            "El servidor IA podría no poder acceder al fichero."
+        )
 
     def _mostrar_resultado_ia(self, id_foto: str, image_path: str, result: dict[str, Any]) -> None:
         win = tk.Toplevel(self)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import socket
 import urllib.error
 import urllib.request
@@ -28,6 +29,7 @@ class OpenAIGateway:
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.base_url = base_url.rstrip("/")
+        self.logger = logging.getLogger("harvestsync.internal_ai.gateway")
 
     def _read_api_key(self) -> str:
         if not self.api_key_path.exists():
@@ -49,6 +51,7 @@ class OpenAIGateway:
 
     def analyze_image(self, *, image_path: Path, task: str, context: str) -> dict[str, Any]:
         api_key = self._read_api_key()
+        self.logger.info("gateway: inicio lectura imagen path=%s", image_path)
         image_bytes = image_path.read_bytes()
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
@@ -80,9 +83,11 @@ class OpenAIGateway:
         )
 
         try:
+            self.logger.info("gateway: inicio llamada OpenAI model=%s timeout=%ss", self.model, self.timeout_seconds)
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
                 parsed = json.loads(raw)
+            self.logger.info("gateway: fin llamada OpenAI id=%s", parsed.get("id", ""))
         except socket.timeout as exc:
             raise TimeoutError("OpenAI request timeout") from exc
         except urllib.error.HTTPError as exc:
