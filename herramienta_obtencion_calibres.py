@@ -155,7 +155,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._config: CalibresConfig | None = None
         self._muestras: list[dict[str, Any]] = []
         self._fotos_by_muestra: dict[str, list[dict[str, Any]]] = {}
+        self._selected_fotos_by_muestra: dict[str, set[str]] = {}
+        self._current_muestra_id: str | None = None
+        self._current_cards: list[dict[str, Any]] = []
         self._preview_refs: list[Any] = []
+        self._fullsize_refs: list[Any] = []
         self._analysis_payload: dict[str, Any] = {}
 
         self._build_ui()
@@ -226,15 +230,24 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         frame_fotos = ttk.LabelFrame(container, text="3) Fotos de 'Datos Calibres'", padding=8)
         frame_fotos.grid(row=2, column=1, sticky="nsew")
-        frame_fotos.rowconfigure(1, weight=1)
+        frame_fotos.rowconfigure(3, weight=1)
         frame_fotos.columnconfigure(0, weight=1)
 
-        ttk.Button(frame_fotos, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=0, sticky="e", pady=(0, 6))
+        toolbar = ttk.Frame(frame_fotos)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        toolbar.columnconfigure(3, weight=1)
+        ttk.Button(toolbar, text="Seleccionar todas", command=self._seleccionar_todas).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(toolbar, text="Deseleccionar todas", command=self._deseleccionar_todas).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(toolbar, text="Invertir selección", command=self._invertir_seleccion).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=4, sticky="e")
+
+        self.resumen_fotos_var = tk.StringVar(value="Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
+        ttk.Label(frame_fotos, textvariable=self.resumen_fotos_var, foreground="#34495e").grid(row=1, column=0, sticky="w", pady=(0, 6))
 
         self.canvas_fotos = tk.Canvas(frame_fotos, highlightthickness=0)
-        self.canvas_fotos.grid(row=1, column=0, sticky="nsew")
+        self.canvas_fotos.grid(row=3, column=0, sticky="nsew")
         self.scroll_fotos = ttk.Scrollbar(frame_fotos, orient="vertical", command=self.canvas_fotos.yview)
-        self.scroll_fotos.grid(row=1, column=1, sticky="ns")
+        self.scroll_fotos.grid(row=3, column=1, sticky="ns")
         self.canvas_fotos.configure(yscrollcommand=self.scroll_fotos.set)
 
         self.frame_fotos_content = ttk.Frame(self.canvas_fotos)
@@ -266,6 +279,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._clear_tree()
         self._limpiar_fotos()
         self._fotos_by_muestra = {}
+        self._selected_fotos_by_muestra = {}
+        self._current_muestra_id = None
+        self._current_cards = []
         self._analysis_payload = {}
 
         def worker() -> None:
@@ -285,6 +301,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
     def _on_busqueda_ok(self, boleta: str, muestras: list[dict[str, Any]], fotos_by_muestra: dict[str, list[dict[str, Any]]]) -> None:
         self._muestras = muestras
         self._fotos_by_muestra = fotos_by_muestra
+        self._selected_fotos_by_muestra = {}
+        for id_muestra, fotos in fotos_by_muestra.items():
+            self._selected_fotos_by_muestra[id_muestra] = {str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")}
 
         for muestra in muestras:
             id_muestra = muestra["id_muestra"]
@@ -336,9 +355,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
         for child in self.frame_fotos_content.winfo_children():
             child.destroy()
         self._preview_refs = []
+        self._fullsize_refs = []
+        self._actualizar_resumen_fotos()
 
     def _render_fotos_muestra(self, id_muestra: str) -> None:
         self._limpiar_fotos()
+        self._current_muestra_id = id_muestra
+        self._current_cards = []
         fotos = self._fotos_by_muestra.get(id_muestra, [])
 
         if not fotos:
@@ -369,6 +392,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
     def _render_cards(self, cards: list[dict[str, Any]]) -> None:
         self._limpiar_fotos()
+        self._current_cards = cards
+        id_muestra = self._current_muestra_id
+        if id_muestra is None:
+            return
+        seleccionadas = self._selected_fotos_by_muestra.setdefault(id_muestra, set())
+
         for idx, card in enumerate(cards):
             fila = idx // 3
             col = idx % 3
@@ -376,8 +405,19 @@ class ObtencionCalibresWindow(BaseToolWindow):
             box.grid(row=fila, column=col, padx=6, pady=6, sticky="nsew")
 
             foto = card["foto"]
+            id_foto = str(foto.get("id_foto", "")).strip()
+            var_usar = tk.BooleanVar(value=id_foto in seleccionadas)
+            check = ttk.Checkbutton(
+                box,
+                text="Usar en análisis",
+                variable=var_usar,
+                command=lambda v=var_usar, i=id_foto: self._on_toggle_foto(i, v.get()),
+            )
+            check.pack(anchor="w", pady=(0, 4))
             ttk.Label(box, text=f"Foto: {foto['id_foto']}", font=("Segoe UI", 9, "bold")).pack(anchor="w")
             ttk.Label(box, text=f"Ruta: {foto['ruta_local']}", wraplength=280).pack(anchor="w", pady=(2, 4))
+            timestamp = foto.get("timestamp")
+            ttk.Label(box, text=f"Timestamp: {timestamp if timestamp is not None else '-'}", wraplength=280, foreground="#4a4a4a").pack(anchor="w", pady=(0, 4))
 
             if card["error"]:
                 ttk.Label(box, text=f"Error descarga: {card['error']}", foreground="#b00020", wraplength=280).pack(anchor="w")
@@ -395,9 +435,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
             label_img = ttk.Label(box, image=thumb)
             label_img.image = thumb
             label_img.pack(anchor="w")
+            label_img.bind("<Button-1>", lambda _event, c=card: self._abrir_vista_ampliada(c))
             self._preview_refs.append(thumb)
             ttk.Label(box, text=card["url"], wraplength=280, foreground="#1b4f72").pack(anchor="w", pady=(4, 0))
 
+        self._actualizar_resumen_fotos()
         self.estado_var.set(f"Fotos cargadas: {len(cards)}")
 
     def _create_thumbnail(self, raw: bytes | None) -> Any | None:
@@ -428,6 +470,17 @@ class ObtencionCalibresWindow(BaseToolWindow):
         rangos = []
         if self._config:
             rangos = self._config.rangos_por_cultivo.get(cultivo, [])
+        fotos_muestra = self._fotos_by_muestra.get(id_muestra, [])
+        ids_seleccionadas = self._selected_fotos_by_muestra.get(id_muestra, set())
+        fotos_seleccionadas = [foto for foto in fotos_muestra if str(foto.get("id_foto", "")) in ids_seleccionadas]
+
+        if not fotos_seleccionadas:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "No hay fotos seleccionadas para el análisis. Seleccione al menos una foto.",
+                parent=self,
+            )
+            return
 
         self._analysis_payload = {
             "id_muestra": id_muestra,
@@ -435,7 +488,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "cultivo": cultivo,
             "diametro_patron_mm": self._config.diametro_patron_mm if self._config else 94.0,
             "rangos": rangos,
-            "fotos": self._fotos_by_muestra.get(id_muestra, []),
+            "fotos": fotos_seleccionadas,
         }
 
         messagebox.showinfo(
@@ -454,6 +507,82 @@ class ObtencionCalibresWindow(BaseToolWindow):
     def get_analysis_payload(self) -> dict[str, Any]:
         """Expone el payload armado para la siguiente etapa (cálculo de calibres)."""
         return dict(self._analysis_payload)
+
+    def _on_toggle_foto(self, id_foto: str, usar_en_analisis: bool) -> None:
+        if not self._current_muestra_id or not id_foto:
+            return
+        seleccionadas = self._selected_fotos_by_muestra.setdefault(self._current_muestra_id, set())
+        if usar_en_analisis:
+            seleccionadas.add(id_foto)
+        else:
+            seleccionadas.discard(id_foto)
+        self._actualizar_resumen_fotos()
+
+    def _actualizar_resumen_fotos(self) -> None:
+        if not self._current_muestra_id:
+            self.resumen_fotos_var.set("Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
+            return
+        total = len(self._fotos_by_muestra.get(self._current_muestra_id, []))
+        seleccionadas = len(self._selected_fotos_by_muestra.get(self._current_muestra_id, set()))
+        excluidas = max(total - seleccionadas, 0)
+        self.resumen_fotos_var.set(
+            f"Fotos encontradas: {total} | Seleccionadas: {seleccionadas} | Excluidas: {excluidas}"
+        )
+
+    def _seleccionar_todas(self) -> None:
+        if not self._current_muestra_id:
+            return
+        fotos = self._fotos_by_muestra.get(self._current_muestra_id, [])
+        self._selected_fotos_by_muestra[self._current_muestra_id] = {
+            str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")
+        }
+        self._render_cards(self._current_cards)
+
+    def _deseleccionar_todas(self) -> None:
+        if not self._current_muestra_id:
+            return
+        self._selected_fotos_by_muestra[self._current_muestra_id] = set()
+        self._render_cards(self._current_cards)
+
+    def _invertir_seleccion(self) -> None:
+        if not self._current_muestra_id:
+            return
+        fotos = self._fotos_by_muestra.get(self._current_muestra_id, [])
+        todos = {str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")}
+        actuales = self._selected_fotos_by_muestra.get(self._current_muestra_id, set())
+        self._selected_fotos_by_muestra[self._current_muestra_id] = todos.difference(actuales)
+        self._render_cards(self._current_cards)
+
+    def _abrir_vista_ampliada(self, card: dict[str, Any]) -> None:
+        raw = card.get("raw")
+        if not raw or Image is None or ImageTk is None:
+            messagebox.showinfo("Obtención calibres", "No hay imagen disponible para ampliar.", parent=self)
+            return
+
+        try:
+            with Image.open(io.BytesIO(raw)) as img:
+                if ImageOps is not None:
+                    img = ImageOps.exif_transpose(img)
+                ancho, alto = img.size
+                max_w, max_h = 1100, 800
+                escala = min(max_w / max(ancho, 1), max_h / max(alto, 1), 1.0)
+                nuevo_size = (max(int(ancho * escala), 1), max(int(alto * escala), 1))
+                if nuevo_size != img.size:
+                    img = img.resize(nuevo_size)
+                photo = ImageTk.PhotoImage(img.copy())
+        except Exception:
+            messagebox.showerror("Obtención calibres", "No fue posible abrir la vista ampliada.", parent=self)
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Vista ampliada - {card.get('foto', {}).get('id_foto', '')}")
+        cont = ttk.Frame(win, padding=8)
+        cont.grid(row=0, column=0, sticky="nsew")
+        win.rowconfigure(0, weight=1)
+        win.columnconfigure(0, weight=1)
+        ttk.Label(cont, image=photo).grid(row=0, column=0, sticky="nsew")
+        ttk.Label(cont, text=str(card.get("url", "")), foreground="#1b4f72", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._fullsize_refs.append(photo)
 
 
 def abrir_obtencion_calibres(parent: tk.Widget, db: firestore.Client) -> None:
