@@ -10,11 +10,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
+import tempfile
 import time
 import traceback
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+import urllib.error
+import urllib.request
 
 from flask import Flask, jsonify, request
 
@@ -102,7 +107,8 @@ def analyze_image() -> Any:
 
     Body JSON esperado:
     {
-      "image_path": "C:/ruta/a/imagen.jpg",
+      "image_url": "http://servidor-fotos/fotos/lote/foto.jpg",  # recomendado
+      "image_path": "C:/ruta/a/imagen.jpg",  # compatibilidad opcional
       "task": "validacion_foto",
       "context": "texto opcional"
     }
@@ -117,28 +123,79 @@ def analyze_image() -> Any:
         logger.warning("analyze_image: invalid_json request_id=%s", request_id)
         return jsonify({"ok": False, "error": "invalid_json", "request_id": request_id}), 400
 
+    image_url_value = payload.get("image_url")
     image_path_value = payload.get("image_path")
     task = payload.get("task", "analisis_general")
     context = payload.get("context", "")
     logger.info(
-        "analyze_image: payload parseado request_id=%s image_path=%r task=%r context_len=%s",
+        "analyze_image: payload parseado request_id=%s image_url=%r image_path=%r task=%r context_len=%s",
         request_id,
+        image_url_value,
         image_path_value,
         task,
         len(context) if isinstance(context, str) else "invalid",
     )
 
-    if not isinstance(image_path_value, str) or not image_path_value.strip():
-        logger.warning("analyze_image: invalid_image_path request_id=%s", request_id)
-        return jsonify({"ok": False, "error": "invalid_image_path", "request_id": request_id}), 400
+    image_path: Path | None = None
+    temporary_file_path: Path | None = None
 
-    image_path = Path(image_path_value)
-    logger.info("analyze_image: check fichero request_id=%s path=%s", request_id, image_path)
-    if not image_path.exists() or not image_path.is_file():
-        logger.warning("analyze_image: image_not_found request_id=%s path=%s", request_id, image_path)
-        return jsonify(
-            {"ok": False, "error": "image_not_found", "request_id": request_id, "image_path": str(image_path)},
-        ), 404
+    if isinstance(image_url_value, str) and image_url_value.strip():
+        image_url = image_url_value.strip()
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"}:
+            logger.warning("analyze_image: invalid_image_url_scheme request_id=%s image_url=%s", request_id, image_url)
+            return jsonify({"ok": False, "error": "invalid_image_url", "request_id": request_id}), 400
+
+        timeout_download = 10
+        logger.info(
+            "analyze_image: inicio descarga image_url request_id=%s timeout=%ss image_url=%s",
+            request_id,
+            timeout_download,
+            image_url,
+        )
+        try:
+            with urllib.request.urlopen(image_url, timeout=timeout_download) as response:
+                image_bytes = response.read()
+        except socket.timeout:
+            logger.error("analyze_image: image_download_timeout request_id=%s image_url=%s", request_id, image_url)
+            return jsonify({"ok": False, "error": "image_download_timeout", "request_id": request_id}), 504
+        except urllib.error.HTTPError as exc:
+            logger.error(
+                "analyze_image: image_url_http_error request_id=%s code=%s image_url=%s",
+                request_id,
+                exc.code,
+                image_url,
+            )
+            return jsonify(
+                {"ok": False, "error": "image_url_http_error", "request_id": request_id, "status_code": exc.code},
+            ), 502
+        except urllib.error.URLError as exc:
+            logger.error("analyze_image: image_download_failed request_id=%s image_url=%s detail=%s", request_id, image_url, exc)
+            return jsonify({"ok": False, "error": "image_download_failed", "request_id": request_id}), 502
+
+        if not image_bytes:
+            logger.error("analyze_image: empty_image_content request_id=%s image_url=%s", request_id, image_url)
+            return jsonify({"ok": False, "error": "empty_image_content", "request_id": request_id}), 502
+
+        suffix = Path(parsed.path).suffix or ".jpg"
+        tmp = tempfile.NamedTemporaryFile(prefix="harvestsync-ai-", suffix=suffix, delete=False)
+        tmp.write(image_bytes)
+        tmp.flush()
+        tmp.close()
+        temporary_file_path = Path(tmp.name)
+        image_path = temporary_file_path
+        logger.info("analyze_image: descarga completada request_id=%s bytes=%s path=%s", request_id, len(image_bytes), image_path)
+    elif isinstance(image_path_value, str) and image_path_value.strip():
+        image_path = Path(image_path_value.strip())
+        logger.info("analyze_image: check fichero request_id=%s path=%s", request_id, image_path)
+        if not image_path.exists() or not image_path.is_file():
+            logger.warning("analyze_image: image_not_found request_id=%s path=%s", request_id, image_path)
+            return jsonify(
+                {"ok": False, "error": "image_not_found", "request_id": request_id, "image_path": str(image_path)},
+            ), 404
+    else:
+        logger.warning("analyze_image: missing_image_input request_id=%s", request_id)
+        return jsonify({"ok": False, "error": "missing_image_input", "request_id": request_id}), 400
 
     if not isinstance(task, str) or len(task.strip()) == 0:
         return jsonify({"ok": False, "error": "invalid_task", "request_id": request_id}), 400
@@ -175,6 +232,12 @@ def analyze_image() -> Any:
     except Exception:  # pragma: no cover - fallback defensivo
         logger.error("analyze_image: internal_error request_id=%s\n%s", request_id, traceback.format_exc())
         return jsonify({"ok": False, "error": "internal_error", "request_id": request_id}), 500
+    finally:
+        if temporary_file_path and temporary_file_path.exists():
+            try:
+                temporary_file_path.unlink()
+            except Exception:  # pragma: no cover - limpieza defensiva
+                logger.warning("analyze_image: no se pudo borrar temporal request_id=%s path=%s", request_id, temporary_file_path)
 
     return jsonify({"ok": True, "result": result, "request_id": request_id})
 
