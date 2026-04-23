@@ -8,6 +8,7 @@ from firebase_admin import firestore
 from herramienta_actualizar_efectivo import abrir_actualizar_efectivo
 from herramienta_stock_campo import abrir_stock_campo
 from herramienta_configuracion_calibres import abrir_configuracion_calibres
+from herramienta_obtencion_calibres import abrir_obtencion_calibres
 from ui_utils import aplicar_icono_principal
 
 
@@ -48,6 +49,12 @@ class HerramientasWindow(tk.Toplevel):
             contenedor,
             text="⚙️ Configuración calibres",
             command=lambda: abrir_configuracion_calibres(self, self.db),
+        ).pack(fill="x", pady=4)
+
+        ttk.Button(
+            contenedor,
+            text="📷 Obtención calibres",
+            command=lambda: abrir_obtencion_calibres(self, self.db),
         ).pack(fill="x", pady=4)
 
 
