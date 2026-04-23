@@ -19,17 +19,21 @@ class InternalAIClientError(RuntimeError):
 def call_analyze_image(
     *,
     server_url: str,
-    image_path: str,
+    image_path: str = "",
+    image_url: str = "",
     task: str,
     context: str = "",
     timeout_seconds: int = 20,
     internal_token: str = "",
 ) -> dict[str, Any]:
     body = {
-        "image_path": image_path,
         "task": task,
         "context": context,
     }
+    if isinstance(image_url, str) and image_url.strip():
+        body["image_url"] = image_url.strip()
+    if isinstance(image_path, str) and image_path.strip():
+        body["image_path"] = image_path.strip()
 
     headers = {"Content-Type": "application/json"}
     if internal_token:
@@ -64,7 +68,7 @@ if __name__ == "__main__":
     # Ejemplo de uso desde HarvestSync Desk.
     result = call_analyze_image(
         server_url="http://SERVIDOR-HARVESTSYNC:8086",
-        image_path=r"C:\HarvestSync\imagenes\box_123.jpg",
+        image_url="http://SERVIDOR-FOTOS/fotos/lote_123/box_123.jpg",
         task="validacion_foto",
         context="revisar si la caja está centrada y visible",
         timeout_seconds=20,

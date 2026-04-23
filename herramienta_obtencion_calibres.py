@@ -954,40 +954,20 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
             return
 
-        image_path_for_ai, mapping_warning = self._resolve_image_path_for_ai(ruta_local)
-        if mapping_warning:
-            LOGGER.warning("Validación IA: %s", mapping_warning)
-
-        resolved_image_path = Path(image_path_for_ai)
-        if not resolved_image_path.is_absolute():
+        image_url_for_ai = self._build_image_url_for_ai(ruta_local)
+        if not image_url_for_ai:
             messagebox.showerror(
                 "Obtención calibres - Validación IA",
                 (
-                    "No se pudo construir una ruta absoluta para la imagen.\n"
-                    "Configure HARVESTSYNC_AI_IMAGE_ROOT para mapear 'ruta_local'."
-                ),
-                parent=self,
-            )
-            return
-        if not resolved_image_path.exists() or not resolved_image_path.is_file():
-            messagebox.showerror(
-                "Obtención calibres - Validación IA",
-                (
-                    "El fichero de imagen no existe en la ruta resuelta.\n"
+                    "No se pudo construir la URL HTTP de la imagen.\n"
                     f"id_foto: {id_foto}\n"
                     f"ruta_local: {ruta_local}\n"
-                    f"ruta_absoluta: {resolved_image_path}"
+                    "Revise ServidorFotos/url_actual/url en Firestore."
                 ),
                 parent=self,
             )
-            LOGGER.error(
-                "Validación IA: imagen no encontrada localmente. id_foto=%s ruta_local=%s ruta_absoluta=%s",
-                id_foto,
-                ruta_local,
-                resolved_image_path,
-            )
+            LOGGER.error("Validación IA: no fue posible construir image_url. id_foto=%s ruta_local=%s", id_foto, ruta_local)
             return
-        image_path_for_ai = str(resolved_image_path)
 
         service_url, source, resolve_error = self.data_service.resolve_url_servicio_ia()
         if not service_url:
@@ -1003,12 +983,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
             return
         LOGGER.info(
-            "Validación IA: preparado request. service_url=%s source=%s id_foto=%s ruta_local=%s image_path_enviado=%s",
+            "Validación IA: preparado request. service_url=%s source=%s id_foto=%s ruta_local=%s image_url_enviada=%s",
             service_url,
             source,
             id_foto,
             ruta_local,
-            image_path_for_ai,
+            image_url_for_ai,
         )
 
         self._ai_validacion_en_curso = True
@@ -1019,17 +999,17 @@ class ObtencionCalibresWindow(BaseToolWindow):
         def worker() -> None:
             t0 = time.perf_counter()
             LOGGER.info(
-                "Validación IA: inicio llamada. base_url=%s endpoint=%s/analyze-image id_foto=%s timeout=%ss image_path=%s",
+                "Validación IA: inicio llamada. base_url=%s endpoint=%s/analyze-image id_foto=%s timeout=%ss image_url=%s",
                 service_url.rstrip("/"),
                 service_url.rstrip("/"),
                 id_foto,
                 timeout_seconds,
-                image_path_for_ai,
+                image_url_for_ai,
             )
             try:
                 result = call_analyze_image(
                     server_url=service_url,
-                    image_path=image_path_for_ai,
+                    image_url=image_url_for_ai,
                     task="validacion_foto",
                     context=(
                         "Evaluar utilidad de imagen para calibres: "
@@ -1039,7 +1019,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 )
                 elapsed = time.perf_counter() - t0
                 LOGGER.info("Validación IA: fin correcto. id_foto=%s duracion=%.2fs", id_foto, elapsed)
-                self.after(0, lambda: self._on_validacion_ia_ok(id_foto=id_foto, image_path=image_path_for_ai, result=result))
+                self.after(0, lambda: self._on_validacion_ia_ok(id_foto=id_foto, image_ref=image_url_for_ai, result=result))
             except InternalAIClientError as exc:
                 elapsed = time.perf_counter() - t0
                 LOGGER.error("Validación IA: error del servicio interno. id_foto=%s duracion=%.2fs error=%s", id_foto, elapsed, exc)
@@ -1050,7 +1030,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         f"Base URL: {service_url.rstrip('/')}\n"
                         "Endpoint esperado: /analyze-image\n"
                         f"id_foto: {id_foto}\n"
-                        f"image_path: {image_path_for_ai}\n\n"
+                        f"image_url: {image_url_for_ai}\n\n"
                         "Revise que el servicio levantado corresponda al servicio IA interno de HarvestSync."
                     )
                 self.after(0, lambda error=error_message: self._on_validacion_ia_error(error))
@@ -1060,11 +1040,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_validacion_ia_ok(self, id_foto: str, image_path: str, result: dict[str, Any]) -> None:
+    def _on_validacion_ia_ok(self, id_foto: str, image_ref: str, result: dict[str, Any]) -> None:
         self._ai_validacion_en_curso = False
         self.btn_validacion_ia.config(state="normal")
         self.estado_var.set(f"Validación IA completada para {id_foto}.")
-        self._mostrar_resultado_ia(id_foto=id_foto, image_path=image_path, result=result)
+        self._mostrar_resultado_ia(id_foto=id_foto, image_ref=image_ref, result=result)
 
     def _on_validacion_ia_error(self, error_message: str) -> None:
         self._ai_validacion_en_curso = False
@@ -1072,26 +1052,15 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.estado_var.set("Validación IA con error.")
         messagebox.showerror("Obtención calibres - Validación IA", error_message, parent=self)
 
-    def _resolve_image_path_for_ai(self, ruta_local: str) -> tuple[str, str | None]:
-        """Devuelve image_path a enviar al servicio IA con diagnóstico de mapeo."""
-        candidate = Path(ruta_local)
-        if candidate.is_absolute():
-            return str(candidate), None
+    def _build_image_url_for_ai(self, ruta_local: str) -> str:
+        """Construye URL HTTP de imagen reutilizando el patrón actual de la herramienta."""
+        url_base = self.data_service.get_url_base_servidor_fotos().strip().rstrip("/")
+        ruta_limpia = ruta_local.lstrip("/\\")
+        if not url_base or not ruta_limpia:
+            return ""
+        return f"{url_base}/fotos/{ruta_limpia}"
 
-        image_root = os.getenv("HARVESTSYNC_AI_IMAGE_ROOT", "").strip()
-        if image_root:
-            mapped = Path(image_root) / ruta_local.lstrip("/\\")
-            return str(mapped), (
-                "ruta_local no es absoluta; se mapea con HARVESTSYNC_AI_IMAGE_ROOT "
-                f"({image_root}) -> {mapped}"
-            )
-
-        return ruta_local, (
-            "ruta_local no es absoluta y no hay HARVESTSYNC_AI_IMAGE_ROOT. "
-            "El servidor IA podría no poder acceder al fichero."
-        )
-
-    def _mostrar_resultado_ia(self, id_foto: str, image_path: str, result: dict[str, Any]) -> None:
+    def _mostrar_resultado_ia(self, id_foto: str, image_ref: str, result: dict[str, Any]) -> None:
         win = tk.Toplevel(self)
         win.title(f"Resultado Validación IA - {id_foto}")
         win.geometry("760x520")
@@ -1105,7 +1074,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         cont.columnconfigure(0, weight=1)
 
         ttk.Label(cont, text=f"Foto: {id_foto}", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(cont, text=f"Ruta enviada: {image_path}", foreground="#1b4f72", wraplength=720).grid(row=0, column=1, sticky="w")
+        ttk.Label(cont, text=f"URL enviada: {image_ref}", foreground="#1b4f72", wraplength=720).grid(row=0, column=1, sticky="w")
 
         text = tk.Text(cont, wrap="word")
         text.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
