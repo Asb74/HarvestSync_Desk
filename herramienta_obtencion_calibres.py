@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -36,6 +37,7 @@ except Exception:  # pragma: no cover - fallback cuando PIL no está disponible
 
 COLLECTION_CONFIG = "Configuraciones"
 DOCUMENT_CONFIG = "calibres"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -148,17 +150,31 @@ class CalibresDataService:
         response.raise_for_status()
         return response.content
 
-    def get_url_servicio_ia(self) -> str:
-        """Resuelve URL del servicio IA con prioridad en variable de entorno."""
+    def resolve_url_servicio_ia(self) -> tuple[str, str, str | None]:
+        """Resuelve URL del servicio IA y devuelve (url, origen, error)."""
         env_url = os.getenv("HARVESTSYNC_INTERNAL_AI_URL", "").strip().rstrip("/")
         if env_url:
-            return env_url
+            LOGGER.info("Validación IA: URL de servicio resuelta desde variable de entorno.")
+            return env_url, "entorno", None
+
         try:
             doc = self.db.collection("ServidorIA").document("url_actual").get()
-            data = doc.to_dict() if doc.exists else {}
-            return str(data.get("url", "") or "").strip().rstrip("/")
-        except Exception:
-            return ""
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Validación IA: error al consultar Firestore para ServidorIA/url_actual.")
+            return "", "firestore_error", f"Firestore inaccesible: {exc}"
+
+        if not doc.exists:
+            LOGGER.warning("Validación IA: no existe documento ServidorIA/url_actual.")
+            return "", "firestore_missing_doc", "No existe documento ServidorIA/url_actual."
+
+        data = doc.to_dict() or {}
+        firestore_url = str(data.get("url", "") or "").strip().rstrip("/")
+        if not firestore_url:
+            LOGGER.warning("Validación IA: campo 'url' vacío en ServidorIA/url_actual.")
+            return "", "firestore_missing_url", "Campo 'url' vacío en ServidorIA/url_actual."
+
+        LOGGER.info("Validación IA: URL de servicio resuelta desde Firestore (ServidorIA/url_actual).")
+        return firestore_url, "firestore", None
 
 
 class ObtencionCalibresWindow(BaseToolWindow):
@@ -937,11 +953,16 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
             return
 
-        service_url = self.data_service.get_url_servicio_ia()
+        service_url, source, resolve_error = self.data_service.resolve_url_servicio_ia()
         if not service_url:
+            LOGGER.error("Validación IA: URL de servicio no resuelta. source=%s error=%s", source, resolve_error)
             messagebox.showerror(
                 "Obtención calibres",
-                "No hay URL de servicio IA. Configure HARVESTSYNC_INTERNAL_AI_URL o ServidorIA/url_actual.",
+                (
+                    "No hay URL de servicio IA.\n"
+                    "Orden de resolución: HARVESTSYNC_INTERNAL_AI_URL -> ServidorIA/url_actual/url.\n"
+                    f"Detalle: {resolve_error or 'No hay configuración disponible.'}"
+                ),
                 parent=self,
             )
             return
@@ -964,8 +985,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 )
                 self.after(0, lambda: self._on_validacion_ia_ok(id_foto=id_foto, image_path=ruta_local, result=result))
             except InternalAIClientError as exc:
+                LOGGER.error("Validación IA: error del servicio interno. %s", exc)
                 self.after(0, lambda: self._on_validacion_ia_error(str(exc)))
             except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("Validación IA: error inesperado en llamada al servicio.")
                 self.after(0, lambda: self._on_validacion_ia_error(f"Error inesperado: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
