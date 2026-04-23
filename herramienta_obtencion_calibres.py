@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import threading
@@ -20,6 +21,10 @@ from calibres_vision import (
     CirclePatternDetector,
     FruitCaliberAnalyzer,
     PhotoFruitAnalysisResult,
+)
+from client_examples.internal_ai_client import (
+    InternalAIClientError,
+    call_analyze_image,
 )
 
 try:
@@ -143,6 +148,18 @@ class CalibresDataService:
         response.raise_for_status()
         return response.content
 
+    def get_url_servicio_ia(self) -> str:
+        """Resuelve URL del servicio IA con prioridad en variable de entorno."""
+        env_url = os.getenv("HARVESTSYNC_INTERNAL_AI_URL", "").strip().rstrip("/")
+        if env_url:
+            return env_url
+        try:
+            doc = self.db.collection("ServidorIA").document("url_actual").get()
+            data = doc.to_dict() if doc.exists else {}
+            return str(data.get("url", "") or "").strip().rstrip("/")
+        except Exception:
+            return ""
+
 
 class ObtencionCalibresWindow(BaseToolWindow):
     """UI para flujo boleta -> muestras -> fotos de pantalla de calibres."""
@@ -178,6 +195,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._overlay_dir = Path(tempfile.gettempdir()) / "harvestsync_desk" / "calibres_overlays"
         self._overlay_dir.mkdir(parents=True, exist_ok=True)
         self._fruit_analyzer = FruitCaliberAnalyzer()
+        self._ai_validacion_en_curso = False
 
         self._build_ui()
         self._cargar_configuracion()
@@ -258,7 +276,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ttk.Button(toolbar, text="Invertir selección", command=self._invertir_seleccion).grid(row=0, column=2, padx=(0, 6))
         ttk.Button(toolbar, text="🎯 Detectar patrón", command=self._detectar_patron_y_escala).grid(row=0, column=3, padx=(0, 6))
         ttk.Button(toolbar, text="🍊 Analizar frutos", command=self._analizar_frutos).grid(row=0, column=4, padx=(0, 6))
-        ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=5, sticky="e")
+        self.btn_validacion_ia = ttk.Button(toolbar, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
+        self.btn_validacion_ia.grid(row=0, column=5, padx=(0, 6))
+        ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=6, sticky="e")
 
         self.resumen_fotos_var = tk.StringVar(value="Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
         ttk.Label(frame_fotos, textvariable=self.resumen_fotos_var, foreground="#34495e").grid(row=1, column=0, sticky="w", pady=(0, 6))
@@ -879,6 +899,114 @@ class ObtencionCalibresWindow(BaseToolWindow):
     def get_analysis_payload(self) -> dict[str, Any]:
         """Expone el payload armado para la siguiente etapa (cálculo de calibres)."""
         return dict(self._analysis_payload)
+
+    def _ejecutar_validacion_ia(self) -> None:
+        if self._ai_validacion_en_curso:
+            return
+        if not self._current_muestra_id:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para ejecutar Validación IA.", parent=self)
+            return
+
+        ids_seleccionadas = sorted(self._selected_fotos_by_muestra.get(self._current_muestra_id, set()))
+        if not ids_seleccionadas:
+            messagebox.showwarning("Obtención calibres", "Marque una foto para ejecutar Validación IA.", parent=self)
+            return
+        if len(ids_seleccionadas) != 1:
+            messagebox.showinfo(
+                "Obtención calibres",
+                "La validación experimental IA se ejecuta sobre una sola foto. Deje marcada únicamente una.",
+                parent=self,
+            )
+            return
+
+        id_foto = ids_seleccionadas[0]
+        card = next((c for c in self._current_cards if str(c.get("foto", {}).get("id_foto", "")) == id_foto), None)
+        if not card:
+            messagebox.showerror("Obtención calibres", "La foto seleccionada no está disponible en memoria.", parent=self)
+            return
+
+        ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+        if not ruta_local:
+            messagebox.showwarning(
+                "Obtención calibres",
+                (
+                    "La foto seleccionada no tiene 'ruta_local'.\n"
+                    "Si la imagen solo existe por URL, hay que mapear/descargar primero a una ruta accesible por el servidor interno."
+                ),
+                parent=self,
+            )
+            return
+
+        service_url = self.data_service.get_url_servicio_ia()
+        if not service_url:
+            messagebox.showerror(
+                "Obtención calibres",
+                "No hay URL de servicio IA. Configure HARVESTSYNC_INTERNAL_AI_URL o ServidorIA/url_actual.",
+                parent=self,
+            )
+            return
+
+        self._ai_validacion_en_curso = True
+        self.btn_validacion_ia.config(state="disabled")
+        self.estado_var.set(f"Validación IA en curso para foto {id_foto}...")
+
+        def worker() -> None:
+            try:
+                result = call_analyze_image(
+                    server_url=service_url,
+                    image_path=ruta_local,
+                    task="validacion_foto",
+                    context=(
+                        "Evaluar utilidad de imagen para calibres: "
+                        "visibilidad general, oclusión, nitidez y presencia/claridad del patrón."
+                    ),
+                    timeout_seconds=20,
+                )
+                self.after(0, lambda: self._on_validacion_ia_ok(id_foto=id_foto, image_path=ruta_local, result=result))
+            except InternalAIClientError as exc:
+                self.after(0, lambda: self._on_validacion_ia_error(str(exc)))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda: self._on_validacion_ia_error(f"Error inesperado: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_validacion_ia_ok(self, id_foto: str, image_path: str, result: dict[str, Any]) -> None:
+        self._ai_validacion_en_curso = False
+        self.btn_validacion_ia.config(state="normal")
+        self.estado_var.set(f"Validación IA completada para {id_foto}.")
+        self._mostrar_resultado_ia(id_foto=id_foto, image_path=image_path, result=result)
+
+    def _on_validacion_ia_error(self, error_message: str) -> None:
+        self._ai_validacion_en_curso = False
+        self.btn_validacion_ia.config(state="normal")
+        self.estado_var.set("Validación IA con error.")
+        messagebox.showerror("Obtención calibres - Validación IA", error_message, parent=self)
+
+    def _mostrar_resultado_ia(self, id_foto: str, image_path: str, result: dict[str, Any]) -> None:
+        win = tk.Toplevel(self)
+        win.title(f"Resultado Validación IA - {id_foto}")
+        win.geometry("760x520")
+        win.minsize(600, 420)
+
+        cont = ttk.Frame(win, padding=10)
+        cont.grid(row=0, column=0, sticky="nsew")
+        win.rowconfigure(0, weight=1)
+        win.columnconfigure(0, weight=1)
+        cont.rowconfigure(1, weight=1)
+        cont.columnconfigure(0, weight=1)
+
+        ttk.Label(cont, text=f"Foto: {id_foto}", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(cont, text=f"Ruta enviada: {image_path}", foreground="#1b4f72", wraplength=720).grid(row=0, column=1, sticky="w")
+
+        text = tk.Text(cont, wrap="word")
+        text.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        scroll = ttk.Scrollbar(cont, orient="vertical", command=text.yview)
+        scroll.grid(row=1, column=2, sticky="ns", pady=(8, 0))
+        text.configure(yscrollcommand=scroll.set)
+
+        pretty = json.dumps(result, ensure_ascii=False, indent=2)
+        text.insert("1.0", pretty)
+        text.configure(state="disabled")
 
     def _on_toggle_foto(self, id_foto: str, usar_en_analisis: bool) -> None:
         if not self._current_muestra_id or not id_foto:
