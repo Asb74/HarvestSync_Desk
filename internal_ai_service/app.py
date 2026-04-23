@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -105,49 +107,76 @@ def analyze_image() -> Any:
       "context": "texto opcional"
     }
     """
+    request_id = uuid.uuid4().hex[:10]
+    remote_ip = request.remote_addr or "-"
+    start_ts = time.perf_counter()
+    logger.info("analyze_image: request recibido request_id=%s ip=%s", request_id, remote_ip)
+
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        return jsonify({"ok": False, "error": "invalid_json"}), 400
+        logger.warning("analyze_image: invalid_json request_id=%s", request_id)
+        return jsonify({"ok": False, "error": "invalid_json", "request_id": request_id}), 400
 
     image_path_value = payload.get("image_path")
     task = payload.get("task", "analisis_general")
     context = payload.get("context", "")
+    logger.info(
+        "analyze_image: payload parseado request_id=%s image_path=%r task=%r context_len=%s",
+        request_id,
+        image_path_value,
+        task,
+        len(context) if isinstance(context, str) else "invalid",
+    )
 
     if not isinstance(image_path_value, str) or not image_path_value.strip():
-        return jsonify({"ok": False, "error": "invalid_image_path"}), 400
+        logger.warning("analyze_image: invalid_image_path request_id=%s", request_id)
+        return jsonify({"ok": False, "error": "invalid_image_path", "request_id": request_id}), 400
 
     image_path = Path(image_path_value)
+    logger.info("analyze_image: check fichero request_id=%s path=%s", request_id, image_path)
     if not image_path.exists() or not image_path.is_file():
-        return jsonify({"ok": False, "error": "image_not_found"}), 404
+        logger.warning("analyze_image: image_not_found request_id=%s path=%s", request_id, image_path)
+        return jsonify(
+            {"ok": False, "error": "image_not_found", "request_id": request_id, "image_path": str(image_path)},
+        ), 404
 
     if not isinstance(task, str) or len(task.strip()) == 0:
-        return jsonify({"ok": False, "error": "invalid_task"}), 400
+        return jsonify({"ok": False, "error": "invalid_task", "request_id": request_id}), 400
 
     if not isinstance(context, str):
-        return jsonify({"ok": False, "error": "invalid_context"}), 400
+        return jsonify({"ok": False, "error": "invalid_context", "request_id": request_id}), 400
 
     try:
+        logger.info("analyze_image: inicio lectura+llamada OpenAI request_id=%s", request_id)
         result = get_gateway().analyze_image(
             image_path=image_path,
             task=task.strip(),
             context=context.strip(),
         )
+        elapsed = time.perf_counter() - start_ts
+        logger.info("analyze_image: fin llamada OpenAI request_id=%s duracion=%.2fs", request_id, elapsed)
     except FileNotFoundError:
-        return jsonify({"ok": False, "error": "openai_key_file_missing"}), 500
+        logger.error("analyze_image: openai_key_file_missing request_id=%s", request_id)
+        return jsonify({"ok": False, "error": "openai_key_file_missing", "request_id": request_id}), 500
     except ValueError as exc:
         # No exponemos detalles sensibles, pero sí diagnóstico útil.
         if "empty" in str(exc):
-            return jsonify({"ok": False, "error": "openai_key_empty"}), 500
-        return jsonify({"ok": False, "error": "invalid_config"}), 500
+            logger.error("analyze_image: openai_key_empty request_id=%s", request_id)
+            return jsonify({"ok": False, "error": "openai_key_empty", "request_id": request_id}), 500
+        logger.error("analyze_image: invalid_config request_id=%s detail=%s", request_id, exc)
+        return jsonify({"ok": False, "error": "invalid_config", "request_id": request_id}), 500
     except TimeoutError:
-        return jsonify({"ok": False, "error": "openai_timeout"}), 504
+        elapsed = time.perf_counter() - start_ts
+        logger.error("analyze_image: openai_timeout request_id=%s duracion=%.2fs", request_id, elapsed)
+        return jsonify({"ok": False, "error": "openai_timeout", "request_id": request_id}), 504
     except OpenAIServiceError as exc:
-        return jsonify({"ok": False, "error": "openai_error", "detail": str(exc)}), 502
+        logger.error("analyze_image: openai_error request_id=%s detail=%s", request_id, exc)
+        return jsonify({"ok": False, "error": "openai_error", "detail": str(exc), "request_id": request_id}), 502
     except Exception:  # pragma: no cover - fallback defensivo
-        logger.error("Error no controlado en /analyze-image\n%s", traceback.format_exc())
-        return jsonify({"ok": False, "error": "internal_error"}), 500
+        logger.error("analyze_image: internal_error request_id=%s\n%s", request_id, traceback.format_exc())
+        return jsonify({"ok": False, "error": "internal_error", "request_id": request_id}), 500
 
-    return jsonify({"ok": True, "result": result})
+    return jsonify({"ok": True, "result": result, "request_id": request_id})
 
 
 if __name__ == "__main__":

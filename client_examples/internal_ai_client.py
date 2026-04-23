@@ -6,6 +6,7 @@ Este cliente NO conoce ni maneja API keys de OpenAI.
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.request
 from typing import Any
@@ -45,6 +46,8 @@ def call_analyze_image(
         with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
             content = response.read().decode("utf-8")
             data = json.loads(content)
+    except socket.timeout as exc:
+        raise InternalAIClientError(f"Timeout de cliente agotado tras {timeout_seconds}s") from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise InternalAIClientError(f"HTTP {exc.code} en servicio interno: {detail[:250]}") from exc
