@@ -414,7 +414,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     fotos_by_muestra[id_muestra] = self.data_service.get_fotos_by_muestra(id_muestra, pantalla)
                 self.after(0, lambda: self._on_busqueda_ok(boleta, muestras, fotos_by_muestra))
             except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: self._on_busqueda_error(exc))
+                self.after(0, lambda error=exc: self._on_busqueda_error(error))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -958,6 +958,37 @@ class ObtencionCalibresWindow(BaseToolWindow):
         if mapping_warning:
             LOGGER.warning("Validación IA: %s", mapping_warning)
 
+        resolved_image_path = Path(image_path_for_ai)
+        if not resolved_image_path.is_absolute():
+            messagebox.showerror(
+                "Obtención calibres - Validación IA",
+                (
+                    "No se pudo construir una ruta absoluta para la imagen.\n"
+                    "Configure HARVESTSYNC_AI_IMAGE_ROOT para mapear 'ruta_local'."
+                ),
+                parent=self,
+            )
+            return
+        if not resolved_image_path.exists() or not resolved_image_path.is_file():
+            messagebox.showerror(
+                "Obtención calibres - Validación IA",
+                (
+                    "El fichero de imagen no existe en la ruta resuelta.\n"
+                    f"id_foto: {id_foto}\n"
+                    f"ruta_local: {ruta_local}\n"
+                    f"ruta_absoluta: {resolved_image_path}"
+                ),
+                parent=self,
+            )
+            LOGGER.error(
+                "Validación IA: imagen no encontrada localmente. id_foto=%s ruta_local=%s ruta_absoluta=%s",
+                id_foto,
+                ruta_local,
+                resolved_image_path,
+            )
+            return
+        image_path_for_ai = str(resolved_image_path)
+
         service_url, source, resolve_error = self.data_service.resolve_url_servicio_ia()
         if not service_url:
             LOGGER.error("Validación IA: URL de servicio no resuelta. source=%s error=%s", source, resolve_error)
@@ -988,9 +1019,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         def worker() -> None:
             t0 = time.perf_counter()
             LOGGER.info(
-                "Validación IA: inicio llamada. id_foto=%s endpoint=%s/analyze-image timeout=%ss image_path=%s",
-                id_foto,
+                "Validación IA: inicio llamada. base_url=%s endpoint=%s/analyze-image id_foto=%s timeout=%ss image_path=%s",
                 service_url.rstrip("/"),
+                service_url.rstrip("/"),
+                id_foto,
                 timeout_seconds,
                 image_path_for_ai,
             )
@@ -1011,10 +1043,20 @@ class ObtencionCalibresWindow(BaseToolWindow):
             except InternalAIClientError as exc:
                 elapsed = time.perf_counter() - t0
                 LOGGER.error("Validación IA: error del servicio interno. id_foto=%s duracion=%.2fs error=%s", id_foto, elapsed, exc)
-                self.after(0, lambda: self._on_validacion_ia_error(str(exc)))
+                error_message = str(exc)
+                if "HTTP 404" in error_message:
+                    error_message = (
+                        "HTTP 404 en servicio interno.\n"
+                        f"Base URL: {service_url.rstrip('/')}\n"
+                        "Endpoint esperado: /analyze-image\n"
+                        f"id_foto: {id_foto}\n"
+                        f"image_path: {image_path_for_ai}\n\n"
+                        "Revise que el servicio levantado corresponda al servicio IA interno de HarvestSync."
+                    )
+                self.after(0, lambda error=error_message: self._on_validacion_ia_error(error))
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("Validación IA: error inesperado en llamada al servicio.")
-                self.after(0, lambda: self._on_validacion_ia_error(f"Error inesperado: {exc}"))
+                self.after(0, lambda error=exc: self._on_validacion_ia_error(f"Error inesperado: {error}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
