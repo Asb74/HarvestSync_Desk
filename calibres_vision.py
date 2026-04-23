@@ -322,7 +322,7 @@ class FruitCaliberAnalyzer:
                 raise ValueError("No se pudo decodificar la imagen")
 
             frame_scaled, ratio = self._resize_if_needed(frame)
-            contours = self._segment_orange_contours(frame_scaled)
+            contours = self._detect_fruit_candidates(frame_scaled)
             fruits: list[FruitDetection] = []
 
             image_h, image_w = frame_scaled.shape[:2]
@@ -405,7 +405,7 @@ class FruitCaliberAnalyzer:
                     caliber_count={},
                     caliber_percentage={},
                     discard_percentage=100.0,
-                    error="Sin candidatos tras segmentación HSV.",
+                    error="Sin candidatos tras segmentación/separación local.",
                 )
 
             if valid_count == 0:
@@ -513,7 +513,21 @@ class FruitCaliberAnalyzer:
         resized = cv2.resize(frame, None, fx=ratio, fy=ratio, interpolation=cv2.INTER_AREA)
         return resized, ratio
 
-    def _segment_orange_contours(self, frame: Any) -> list[Any]:
+    def _detect_fruit_candidates(self, frame: Any) -> list[Any]:
+        """Obtiene candidatos individuales con enfoque local para fruta en contacto."""
+        mask = self._build_orange_mask(frame)
+        if cv2.countNonZero(mask) == 0:
+            return []
+
+        contours = self._split_touching_regions_with_watershed(frame, mask)
+        if contours:
+            return contours
+
+        # Fallback conservador: componentes conectados directos si watershed no separa nada.
+        contours_cc, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return list(contours_cc)
+
+    def _build_orange_mask(self, frame: Any) -> Any:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         lower_1 = np.array([3, 70, 45], dtype=np.uint8)
         upper_1 = np.array([24, 255, 255], dtype=np.uint8)
@@ -528,8 +542,62 @@ class FruitCaliberAnalyzer:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return list(contours)
+        # Limpieza por componente para evitar ruido de color naranja pequeño.
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        min_component_area = max(int(frame.shape[0] * frame.shape[1] * 0.00008), 80)
+        cleaned = np.zeros_like(mask)
+        for idx in range(1, num_labels):
+            area = int(stats[idx, cv2.CC_STAT_AREA])
+            if area >= min_component_area:
+                cleaned[labels == idx] = 255
+
+        return cleaned
+
+    def _split_touching_regions_with_watershed(self, frame: Any, mask: Any) -> list[Any]:
+        """Separa masas conectadas usando transformada de distancia + watershed."""
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        sure_bg = cv2.dilate(mask, kernel, iterations=2)
+
+        dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+        dist_max = float(dist.max())
+        if dist_max <= 0.0:
+            return []
+
+        # Pico alto => centro de fruta. Umbral conservador para evitar sobre-segmentación.
+        _, sure_fg = cv2.threshold(dist, dist_max * 0.34, 255, cv2.THRESH_BINARY)
+        sure_fg = sure_fg.astype(np.uint8)
+        sure_fg = cv2.morphologyEx(sure_fg, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        num_markers, markers = cv2.connectedComponents(sure_fg)
+        if num_markers <= 1:
+            return []
+
+        markers = markers + 1
+        unknown = cv2.subtract(sure_bg, sure_fg)
+        markers[unknown == 255] = 0
+
+        # Watershed opera in-place sobre copia.
+        ws_input = frame.copy()
+        markers = cv2.watershed(ws_input, markers)
+
+        image_h, image_w = frame.shape[:2]
+        border_margin = max(int(min(image_h, image_w) * 0.015), 4)
+        contours: list[Any] = []
+        for label in range(2, int(markers.max()) + 1):
+            region_mask = np.uint8(markers == label) * 255
+            if cv2.countNonZero(region_mask) < 80:
+                continue
+            cs, _ = cv2.findContours(region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cs:
+                continue
+            contour = max(cs, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(contour)
+            if x <= border_margin or y <= border_margin or (x + w) >= (image_w - border_margin) or (y + h) >= (image_h - border_margin):
+                # Borde de box/imagen: visibilidad parcial, no fiable para diámetro ecuatorial.
+                continue
+            contours.append(contour)
+
+        return contours
 
     def _assign_caliber(self, diameter_mm: float, caliber_ranges: list[dict[str, Any]]) -> str:
         if not caliber_ranges:

@@ -78,6 +78,22 @@ class TestCalibresVision(unittest.TestCase):
         self.assertEqual(len(result.fruits), 0)
         self.assertIsNotNone(result.error)
 
+    def test_separa_fruta_agrupada_con_watershed(self) -> None:
+        frame = np.zeros((900, 900, 3), dtype=np.uint8)
+        naranja = (0, 140, 255)
+        # Grupo muy junto (superposición importante)
+        centers = [(330, 370), (430, 360), (520, 410), (400, 470), (500, 500)]
+        for cx, cy in centers:
+            cv2.circle(frame, (cx, cy), 92, naranja, thickness=-1)
+
+        raw = self._encode_png(frame)
+        analyzer = FruitCaliberAnalyzer()
+        result = analyzer.analyze_photo("foto_frutos_watershed", raw, mm_per_pixel=0.45, caliber_ranges=[])
+
+        # El caso previo tendía a detectar una sola masa. Ahora debe producir varios candidatos.
+        self.assertGreaterEqual(len(result.fruits), 3)
+        self.assertTrue(any(item.valid for item in result.fruits))
+
 
 if __name__ == '__main__':
     unittest.main()
