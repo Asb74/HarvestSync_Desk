@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,8 @@ COLLECTION_CONFIG = "Configuraciones"
 DOCUMENT_CONFIG = "calibres"
 LOGGER = logging.getLogger(__name__)
 DB_FRUTA_PATH = r"X:\BasesSQLite\DBfruta.sqlite"
+CALIBRES_IA_HISTORY_DB_ENV = "HARVESTSYNC_CALIBRES_IA_DB_PATH"
+CALIBRES_IA_HISTORY_DB_DEFAULT_PATH = r"\Personal\C\BasesSQLite\DBcalibres_ia.sqlite"
 CALIBRES_CALIBRADOR = [f"CAL {idx}" for idx in range(10)]
 FILTRO_CALIBRADOR_CAMPANA = "2026"
 FILTRO_CALIBRADOR_EMPRESA = "1"
@@ -260,6 +263,160 @@ class CalibresConfigRepository:
         )
 
 
+class CalibresIAHistoryRepository:
+    """Persistencia local SQLite para histórico IA vs calibrador."""
+
+    def __init__(self, db_path: str | None = None) -> None:
+        configured = (db_path or os.getenv(CALIBRES_IA_HISTORY_DB_ENV, "")).strip()
+        self.db_path = configured or CALIBRES_IA_HISTORY_DB_DEFAULT_PATH
+        self._initialized = False
+        self._lock = threading.Lock()
+
+    def ensure_schema(self) -> None:
+        with self._lock:
+            if self._initialized:
+                return
+            db_file = Path(self.db_path)
+            db_file.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(str(db_file)) as conn:
+                conn.execute("PRAGMA busy_timeout = 5000;")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS comparaciones_calibres (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        fecha_registro TEXT NOT NULL,
+                        boleta INTEGER,
+                        albaran TEXT,
+                        tipo_comparacion TEXT,
+                        campana INTEGER,
+                        empresa INTEGER,
+                        cultivo TEXT,
+                        variedad TEXT,
+                        socio TEXT,
+                        id_socio INTEGER,
+                        neto REAL,
+                        id_foto TEXT,
+                        image_url TEXT,
+                        ruta_local TEXT,
+                        modelo_ia TEXT,
+                        prompt_version TEXT,
+                        confianza_ia REAL,
+                        calibre_dominante_ia TEXT,
+                        calibre_dominante_real TEXT,
+                        error_absoluto_medio REAL,
+                        error_total_absoluto REAL,
+                        podrido REAL,
+                        deslinea REAL,
+                        desmesa REAL,
+                        destrio_total REAL,
+                        suma_calibres_real REAL,
+                        ia_cal0 REAL,
+                        ia_cal1 REAL,
+                        ia_cal2 REAL,
+                        ia_cal3 REAL,
+                        ia_cal4 REAL,
+                        ia_cal5 REAL,
+                        ia_cal6 REAL,
+                        ia_cal7 REAL,
+                        ia_cal8 REAL,
+                        ia_cal9 REAL,
+                        real_norm_cal0 REAL,
+                        real_norm_cal1 REAL,
+                        real_norm_cal2 REAL,
+                        real_norm_cal3 REAL,
+                        real_norm_cal4 REAL,
+                        real_norm_cal5 REAL,
+                        real_norm_cal6 REAL,
+                        real_norm_cal7 REAL,
+                        real_norm_cal8 REAL,
+                        real_norm_cal9 REAL,
+                        real_bruto_cal0 REAL,
+                        real_bruto_cal1 REAL,
+                        real_bruto_cal2 REAL,
+                        real_bruto_cal3 REAL,
+                        real_bruto_cal4 REAL,
+                        real_bruto_cal5 REAL,
+                        real_bruto_cal6 REAL,
+                        real_bruto_cal7 REAL,
+                        real_bruto_cal8 REAL,
+                        real_bruto_cal9 REAL,
+                        advertencias_ia TEXT,
+                        resumen_ia TEXT,
+                        output_ia_json TEXT,
+                        observaciones TEXT
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_boleta ON comparaciones_calibres (boleta)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_albaran ON comparaciones_calibres (albaran)")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_comp_calibres_fecha_registro ON comparaciones_calibres (fecha_registro)"
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_variedad ON comparaciones_calibres (variedad)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_cultivo ON comparaciones_calibres (cultivo)")
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_comp_calibres_dedupe
+                    ON comparaciones_calibres (boleta, albaran, id_foto, modelo_ia, prompt_version)
+                    """
+                )
+                conn.commit()
+            self._initialized = True
+
+    def save_comparison(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        self.ensure_schema()
+        columns = [
+            "fecha_registro",
+            "boleta",
+            "albaran",
+            "tipo_comparacion",
+            "campana",
+            "empresa",
+            "cultivo",
+            "variedad",
+            "socio",
+            "id_socio",
+            "neto",
+            "id_foto",
+            "image_url",
+            "ruta_local",
+            "modelo_ia",
+            "prompt_version",
+            "confianza_ia",
+            "calibre_dominante_ia",
+            "calibre_dominante_real",
+            "error_absoluto_medio",
+            "error_total_absoluto",
+            "podrido",
+            "deslinea",
+            "desmesa",
+            "destrio_total",
+            "suma_calibres_real",
+            *[f"ia_cal{idx}" for idx in range(10)],
+            *[f"real_norm_cal{idx}" for idx in range(10)],
+            *[f"real_bruto_cal{idx}" for idx in range(10)],
+            "advertencias_ia",
+            "resumen_ia",
+            "output_ia_json",
+            "observaciones",
+        ]
+        placeholders = ", ".join(["?"] * len(columns))
+        assignments = ", ".join([f"{col}=excluded.{col}" for col in columns if col not in {"fecha_registro"}])
+        sql = (
+            f"INSERT INTO comparaciones_calibres ({', '.join(columns)}) VALUES ({placeholders}) "
+            "ON CONFLICT(boleta, albaran, id_foto, modelo_ia, prompt_version) DO UPDATE SET "
+            f"{assignments}"
+        )
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            payload = [tuple(row.get(col) for col in columns) for row in rows]
+            conn.executemany(sql, payload)
+            conn.commit()
+            return len(rows)
+
+
 class CalibresDataService:
     """Consultas a Firestore + servidor de fotos reutilizando el patrón actual."""
 
@@ -362,6 +519,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         self.config_repo = CalibresConfigRepository(db_firestore)
         self.data_service = CalibresDataService(db_firestore)
+        self.history_repo = CalibresIAHistoryRepository()
 
         self.boleta_var = tk.StringVar()
         self.estado_var = tk.StringVar(value="Ingrese una boleta para comenzar.")
@@ -392,6 +550,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._ai_estimacion_en_curso = False
         self._flujo_recomendado_en_curso = False
         self._comparacion_ia_vs_calibrador: dict[str, Any] = {}
+        self._contexto_comparacion_actual: dict[str, Any] = {}
         self._entregas_calibrador: list[dict[str, Any]] = []
         self._boleta_entregas_calibrador: str = ""
         self._selector_entrega_map: dict[str, dict[str, Any] | None] = {}
@@ -516,7 +675,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         tab_validacion_ia.columnconfigure(0, weight=1)
         toolbar_ia = ttk.Frame(tab_validacion_ia)
         toolbar_ia.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        toolbar_ia.columnconfigure(5, weight=1)
+        toolbar_ia.columnconfigure(6, weight=1)
         self.btn_validacion_ia = ttk.Button(toolbar_ia, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
         self.btn_validacion_ia.grid(row=0, column=0, padx=(0, 6))
         self.btn_validar_lote_ia = ttk.Button(toolbar_ia, text="🤖 Validar lote IA", command=self._validar_lote_ia)
@@ -541,6 +700,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
             command=self._comparar_ia_vs_calibrador,
         )
         self.btn_comparar_calibrador.grid(row=0, column=5, padx=(0, 6))
+        self.btn_guardar_historico = ttk.Button(
+            toolbar_ia,
+            text="💾 Guardar comparación histórico",
+            command=self._guardar_comparacion_historico,
+        )
+        self.btn_guardar_historico.grid(row=0, column=6, padx=(0, 6))
 
         ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
         ia_frame.grid(row=1, column=0, sticky="nsew")
@@ -1817,6 +1982,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 "Comparación realizada sobre distribución de calibres normalizada, excluyendo podrido y destrío."
             )
         self._comparacion_ia_vs_calibrador = {}
+        self._contexto_comparacion_actual = {}
 
     def _limpiar_selector_entregas(self) -> None:
         self._entregas_calibrador = []
@@ -2010,6 +2176,14 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._limpiar_resultados_comparacion_calibres()
         comp = comparar_distribuciones(distribucion_ia, real_normalizado)
         self._comparacion_ia_vs_calibrador = {"boleta": boleta, **comp}
+        entrega_ctx = None if clave_selector == OPCION_BOLETA_COMPLETA else self._selector_entrega_map.get(clave_selector)
+        self._contexto_comparacion_actual = {
+            "contexto": contexto,
+            "entrega": entrega_ctx,
+            "tipo_comparacion": "boleta_completa" if entrega_ctx is None else "entrega",
+            "calibrador": calibrador,
+            "real_normalizado": real_normalizado,
+        }
         self.resumen_calibrador_var.set(
             "Calibrador total partida: "
             f"Podrido={calibrador['podrido']:.2f}% | DesLínea={calibrador['des_linea']:.2f}% | "
@@ -2038,6 +2212,188 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.nota_comparacion_var.set(
             f"Comparación sobre {contexto}. Distribución real normalizada en CAL0..CAL9; "
             "podrido/destrío no forman parte de dicha normalización."
+        )
+
+    @staticmethod
+    def _to_int_or_none(value: Any) -> int | None:
+        if value is None:
+            return None
+        texto = str(value).strip()
+        if not texto:
+            return None
+        try:
+            return int(float(texto.replace(",", ".")))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _to_float_or_none(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        texto = str(value).strip().replace("%", "").replace(",", ".")
+        if not texto:
+            return None
+        try:
+            return float(texto)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalizar_distribucion_por_foto(distribucion: list[dict[str, Any]]) -> dict[str, float]:
+        acumulado = {f"CAL {idx}": 0.0 for idx in range(10)}
+        for item in distribucion or []:
+            calibre = str(item.get("calibre", "")).strip().upper()
+            if calibre not in acumulado:
+                continue
+            pct = ObtencionCalibresWindow._to_float_or_none(item.get("porcentaje"))
+            if pct is None:
+                continue
+            acumulado[calibre] += max(0.0, pct)
+        total = sum(acumulado.values())
+        if total <= 0:
+            return acumulado
+        return {calibre: (valor * 100.0 / total) for calibre, valor in acumulado.items()}
+
+    def _build_historial_row(self, id_foto: str, estimacion: dict[str, Any]) -> dict[str, Any]:
+        comparacion = self._comparacion_ia_vs_calibrador
+        contexto = self._contexto_comparacion_actual
+        if not comparacion or not contexto:
+            raise ValueError("Primero compare IA vs calibrador para generar métricas históricas.")
+
+        boleta = self._get_boleta_actual()
+        entrega = contexto.get("entrega")
+        if entrega is None:
+            entrega = self._entregas_calibrador[0] if self._entregas_calibrador else {}
+
+        calibrador = contexto.get("calibrador", {})
+        real_norm = contexto.get("real_normalizado", {})
+        distribucion_foto = self._normalizar_distribucion_por_foto(estimacion.get("distribucion", []))
+        comp_foto = comparar_distribuciones(distribucion_foto, real_norm)
+
+        card = next((item for item in self._current_cards if str(item.get("foto", {}).get("id_foto", "")) == id_foto), {})
+        ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+        output_json = estimacion.get("json_parseado")
+        output_json_text = json.dumps(output_json, ensure_ascii=False) if isinstance(output_json, dict) else str(
+            estimacion.get("output_text_original", "") or ""
+        )
+        advertencias = estimacion.get("advertencias", [])
+        advertencias_texto = " | ".join(str(item).strip() for item in advertencias if str(item).strip())
+        raw_result = estimacion.get("raw_result", {})
+        prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or "estimacion_calibres_v1"
+
+        row = {
+            "fecha_registro": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "boleta": self._to_int_or_none(boleta),
+            "albaran": str(
+                entrega.get("AlbaranDef") or entrega.get("Albaran") or entrega.get("Albaran2") or OPCION_BOLETA_COMPLETA
+            ).strip(),
+            "tipo_comparacion": str(contexto.get("tipo_comparacion", "") or "").strip(),
+            "campana": self._to_int_or_none(entrega.get("Campana")),
+            "empresa": self._to_int_or_none(entrega.get("Empresa")),
+            "cultivo": str(entrega.get("Cultivo", "") or "").strip(),
+            "variedad": str(entrega.get("Variedad", "") or "").strip(),
+            "socio": str(entrega.get("Socio", "") or "").strip(),
+            "id_socio": self._to_int_or_none(entrega.get("IdSocio")),
+            "neto": self._to_float_or_none(entrega.get("Neto")),
+            "id_foto": id_foto,
+            "image_url": str(estimacion.get("image_url", "") or "").strip(),
+            "ruta_local": ruta_local,
+            "modelo_ia": str(raw_result.get("model", "") or "").strip() or "desconocido",
+            "prompt_version": prompt_version,
+            "confianza_ia": self._to_float_or_none(estimacion.get("confianza")),
+            "calibre_dominante_ia": str(comp_foto.get("calibre_dominante_ia", "") or "").strip(),
+            "calibre_dominante_real": str(comp_foto.get("calibre_dominante_real", "") or "").strip(),
+            "error_absoluto_medio": self._to_float_or_none(comp_foto.get("error_abs_medio")),
+            "error_total_absoluto": self._to_float_or_none(comp_foto.get("error_total_abs")),
+            "podrido": self._to_float_or_none(calibrador.get("podrido")),
+            "deslinea": self._to_float_or_none(calibrador.get("des_linea")),
+            "desmesa": self._to_float_or_none(calibrador.get("des_mesa")),
+            "destrio_total": self._to_float_or_none(calibrador.get("destrio_total")),
+            "suma_calibres_real": self._to_float_or_none(calibrador.get("suma_calibres")),
+            "advertencias_ia": advertencias_texto,
+            "resumen_ia": str(estimacion.get("resumen", "") or "").strip(),
+            "output_ia_json": output_json_text,
+            "observaciones": str(estimacion.get("diagnostico", "") or "").strip(),
+        }
+        for idx in range(10):
+            calibre = f"CAL {idx}"
+            row[f"ia_cal{idx}"] = distribucion_foto.get(calibre, 0.0)
+            row[f"real_norm_cal{idx}"] = real_norm.get(calibre, 0.0)
+            row[f"real_bruto_cal{idx}"] = calibrador.get("calibres_brutos", {}).get(calibre, 0.0)
+        return row
+
+    def _guardar_comparacion_historico(self) -> None:
+        if self._ai_estimacion_en_curso or self._ai_lote_en_curso or self._ai_validacion_en_curso:
+            messagebox.showinfo("Obtención calibres", "Espere a que finalicen los procesos IA antes de guardar.", parent=self)
+            return
+        if not self._comparacion_ia_vs_calibrador or not self._contexto_comparacion_actual:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "No hay comparación activa. Ejecute primero 'Comparar IA vs calibrador'.",
+                parent=self,
+            )
+            return
+        resultados = self._get_estimacion_resultados_muestra_actual()
+        if not resultados:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "No hay resultados de estimación IA para guardar.",
+                parent=self,
+            )
+            return
+
+        rows: list[dict[str, Any]] = []
+        incompletas = 0
+        for id_foto, estimacion in resultados.items():
+            if estimacion.get("error") or estimacion.get("apta_para_estimacion") != "Sí":
+                incompletas += 1
+                continue
+            distribucion = estimacion.get("distribucion", [])
+            if not isinstance(distribucion, list) or not distribucion:
+                incompletas += 1
+                continue
+            rows.append(self._build_historial_row(id_foto, estimacion))
+
+        if not rows:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "No hay filas completas para guardar. Revise estimación IA y comparación.",
+                parent=self,
+            )
+            return
+
+        self._set_controles_lote_ia_habilitados(False)
+        self.estado_var.set(f"Guardando histórico IA ({len(rows)} filas)...")
+
+        def worker() -> None:
+            try:
+                saved = self.history_repo.save_comparison(rows)
+                self.after(0, lambda: self._on_guardar_historico_ok(saved, incompletas))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda error=exc: self._on_guardar_historico_error(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_guardar_historico_ok(self, saved_rows: int, skipped_rows: int) -> None:
+        self._set_controles_lote_ia_habilitados(True)
+        ruta = self.history_repo.db_path
+        self.estado_var.set(f"Histórico IA guardado ({saved_rows} filas).")
+        sufijo = f"\nFilas omitidas por incompletas: {skipped_rows}." if skipped_rows else ""
+        messagebox.showinfo(
+            "Obtención calibres",
+            f"Comparación histórica guardada.\nFilas persistidas: {saved_rows}.\nDB: {ruta}{sufijo}",
+            parent=self,
+        )
+
+    def _on_guardar_historico_error(self, exc: Exception) -> None:
+        self._set_controles_lote_ia_habilitados(True)
+        self.estado_var.set("Error al guardar histórico IA.")
+        messagebox.showerror(
+            "Obtención calibres",
+            f"No se pudo guardar histórico IA en {self.history_repo.db_path}: {exc}",
+            parent=self,
         )
 
     def _pintar_resultados_ia(self) -> None:
@@ -2099,6 +2455,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_estimacion_calibres_ia,
             self.btn_ver_detalle_estimacion_ia,
             self.btn_comparar_calibrador,
+            self.btn_guardar_historico,
             self.btn_preparar_analisis,
             self.btn_ejecutar_flujo,
         ):
