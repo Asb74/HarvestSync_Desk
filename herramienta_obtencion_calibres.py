@@ -210,11 +210,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._frutos_resultados: dict[str, PhotoFruitAnalysisResult] = {}
         self._frutos_overlay_paths_by_foto: dict[str, str] = {}
         self._ia_validacion_resultados_by_muestra: dict[str, dict[str, dict[str, Any]]] = {}
+        self._ia_estimacion_resultados_by_muestra: dict[str, dict[str, dict[str, Any]]] = {}
         self._overlay_dir = Path(tempfile.gettempdir()) / "harvestsync_desk" / "calibres_overlays"
         self._overlay_dir.mkdir(parents=True, exist_ok=True)
         self._fruit_analyzer = FruitCaliberAnalyzer()
         self._ai_validacion_en_curso = False
         self._ai_lote_en_curso = False
+        self._ai_estimacion_en_curso = False
         self._flujo_recomendado_en_curso = False
 
         self._build_ui()
@@ -342,6 +344,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.btn_validar_lote_ia.grid(row=0, column=1, padx=(0, 6))
         self.btn_usar_solo_aptas_ia = ttk.Button(toolbar_ia, text="✅ Usar solo aptas IA", command=self._usar_solo_aptas_ia)
         self.btn_usar_solo_aptas_ia.grid(row=0, column=2, padx=(0, 6))
+        self.btn_estimacion_calibres_ia = ttk.Button(
+            toolbar_ia,
+            text="🧪 Estimación calibres IA",
+            command=self._ejecutar_estimacion_calibres_ia,
+        )
+        self.btn_estimacion_calibres_ia.grid(row=0, column=3, padx=(0, 6))
 
         ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
         ia_frame.grid(row=1, column=0, sticky="nsew")
@@ -373,6 +381,54 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ttk.Label(ia_frame, textvariable=self.resumen_ia_lote_var, foreground="#34495e").grid(
             row=1, column=0, sticky="w", pady=(6, 0)
         )
+
+        estimacion_frame = ttk.LabelFrame(tab_validacion_ia, text="Estimación IA experimental por foto", padding=6)
+        estimacion_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+        estimacion_frame.rowconfigure(0, weight=1)
+        estimacion_frame.columnconfigure(0, weight=1)
+
+        self.tree_estimacion_ia = ttk.Treeview(
+            estimacion_frame,
+            columns=("id_foto", "apta", "confianza", "frutos", "dominante", "distribucion", "estado"),
+            show="headings",
+            height=6,
+        )
+        headers_estimacion = {
+            "id_foto": "Foto",
+            "apta": "Apta estimación",
+            "confianza": "Confianza",
+            "frutos": "Frutos visibles",
+            "dominante": "Calibre dominante",
+            "distribucion": "Distribución",
+            "estado": "Estado/Error",
+        }
+        widths_estimacion = {
+            "id_foto": 170,
+            "apta": 110,
+            "confianza": 80,
+            "frutos": 95,
+            "dominante": 120,
+            "distribucion": 260,
+            "estado": 260,
+        }
+        for col in headers_estimacion:
+            self.tree_estimacion_ia.heading(col, text=headers_estimacion[col])
+            self.tree_estimacion_ia.column(col, width=widths_estimacion[col], anchor="w")
+        self.tree_estimacion_ia.grid(row=0, column=0, sticky="nsew")
+        self.resumen_estimacion_ia_var = tk.StringVar(
+            value="Estimación IA experimental: evaluadas=0 | aptas=0 | confianza media=- | distribución consolidada=-"
+        )
+        ttk.Label(estimacion_frame, textvariable=self.resumen_estimacion_ia_var, foreground="#34495e").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        self.advertencias_estimacion_ia_var = tk.StringVar(value="Advertencias estimación IA experimental: -")
+        ttk.Label(
+            estimacion_frame,
+            textvariable=self.advertencias_estimacion_ia_var,
+            foreground="#7d6608",
+            wraplength=980,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
 
         tab_patron_escala.rowconfigure(1, weight=1)
         tab_patron_escala.columnconfigure(0, weight=1)
@@ -539,9 +595,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
         self._ia_validacion_resultados_by_muestra = {}
+        self._ia_estimacion_resultados_by_muestra = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
         self._limpiar_resultados_ia()
+        self._limpiar_resultados_estimacion_ia()
 
         def worker() -> None:
             try:
@@ -625,6 +683,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
         self._limpiar_resultados_ia()
+        self._limpiar_resultados_estimacion_ia()
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
         self._current_muestra_id = id_muestra
@@ -1243,25 +1302,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
     def _parse_validacion_ia_result(result: dict[str, Any]) -> dict[str, Any]:
         """Parsea result['output_text'] como JSON y devuelve datos listos para UI."""
         output_text = result.get("output_text", "")
-        parsed_output: dict[str, Any] | None = None
-
-        if isinstance(output_text, dict):
-            parsed_output = output_text
-        elif isinstance(output_text, str):
-            output_text_clean = output_text.strip()
-            if output_text_clean:
-                try:
-                    first_pass = json.loads(output_text_clean)
-                    if isinstance(first_pass, dict):
-                        parsed_output = first_pass
-                    elif isinstance(first_pass, str):
-                        second_pass = json.loads(first_pass)
-                        if isinstance(second_pass, dict):
-                            parsed_output = second_pass
-                except json.JSONDecodeError:
-                    parsed_output = None
-
-        parsed_output = parsed_output or {}
+        parsed_output = ObtencionCalibresWindow._parse_output_json(output_text)
         alertas = parsed_output.get("alertas", [])
         if isinstance(alertas, str):
             alertas = [alertas]
@@ -1290,6 +1331,85 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "json_parseado": parsed_output,
         }
 
+    @staticmethod
+    def _parse_output_json(output_text: Any) -> dict[str, Any]:
+        if isinstance(output_text, dict):
+            return output_text
+        if not isinstance(output_text, str):
+            return {}
+        output_text_clean = output_text.strip()
+        if not output_text_clean:
+            return {}
+
+        candidate_texts = [output_text_clean]
+        if "```" in output_text_clean:
+            parts = output_text_clean.split("```")
+            for part in parts:
+                part_clean = part.strip()
+                if not part_clean:
+                    continue
+                if part_clean.lower().startswith("json"):
+                    part_clean = part_clean[4:].strip()
+                candidate_texts.append(part_clean)
+
+        for candidate in candidate_texts:
+            try:
+                first_pass = json.loads(candidate)
+                if isinstance(first_pass, dict):
+                    return first_pass
+                if isinstance(first_pass, str):
+                    second_pass = json.loads(first_pass)
+                    if isinstance(second_pass, dict):
+                        return second_pass
+            except json.JSONDecodeError:
+                continue
+        return {}
+
+    @staticmethod
+    def _parse_estimacion_ia_result(result: dict[str, Any]) -> dict[str, Any]:
+        parsed_output = ObtencionCalibresWindow._parse_output_json(result.get("output_text", ""))
+        advertencias = parsed_output.get("advertencias", [])
+        if isinstance(advertencias, str):
+            advertencias = [advertencias]
+        if not isinstance(advertencias, list):
+            advertencias = [str(advertencias)]
+
+        distribucion_raw = parsed_output.get("distribucion", [])
+        distribucion: list[dict[str, Any]] = []
+        if isinstance(distribucion_raw, list):
+            for item in distribucion_raw:
+                if not isinstance(item, dict):
+                    continue
+                calibre = str(item.get("calibre", "")).strip()
+                porcentaje = ObtencionCalibresWindow._confianza_a_float(item.get("porcentaje"))
+                if not calibre:
+                    continue
+                distribucion.append(
+                    {
+                        "calibre": calibre,
+                        "porcentaje": 0.0 if porcentaje is None else max(0.0, min(100.0, porcentaje)),
+                    }
+                )
+
+        apta_raw = parsed_output.get("apta_para_estimacion")
+        if isinstance(apta_raw, bool):
+            apta_texto = "Sí" if apta_raw else "No"
+        else:
+            apta_texto = "-"
+
+        return {
+            "apta_para_estimacion": apta_texto,
+            "confianza": parsed_output.get("confianza", "-"),
+            "frutos_visibles_estimados": parsed_output.get("frutos_visibles_estimados", "-"),
+            "calibre_dominante": parsed_output.get("calibre_dominante", "-"),
+            "distribucion": distribucion,
+            "advertencias": advertencias,
+            "resumen": parsed_output.get("resumen", "-"),
+            "json_parse_ok": bool(parsed_output),
+            "json_parseado": parsed_output,
+            "output_text_original": result.get("output_text", ""),
+        }
+
     def _get_ia_resultados_muestra_actual(self) -> dict[str, dict[str, Any]]:
         if not self._current_muestra_id:
             return {}
@@ -1306,6 +1426,23 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 self.tree_validacion_ia.delete(item)
         if hasattr(self, "resumen_ia_lote_var"):
             self.resumen_ia_lote_var.set("IA lote: evaluadas=0 | aptas=0 | no aptas=0 | errores=0 | confianza media=-")
+        self._actualizar_resumen_global()
+
+    def _get_estimacion_resultados_muestra_actual(self) -> dict[str, dict[str, Any]]:
+        if not self._current_muestra_id:
+            return {}
+        return self._ia_estimacion_resultados_by_muestra.setdefault(self._current_muestra_id, {})
+
+    def _limpiar_resultados_estimacion_ia(self) -> None:
+        if hasattr(self, "tree_estimacion_ia"):
+            for item in self.tree_estimacion_ia.get_children(""):
+                self.tree_estimacion_ia.delete(item)
+        if hasattr(self, "resumen_estimacion_ia_var"):
+            self.resumen_estimacion_ia_var.set(
+                "Estimación IA experimental: evaluadas=0 | aptas=0 | confianza media=- | distribución consolidada=-"
+            )
+        if hasattr(self, "advertencias_estimacion_ia_var"):
+            self.advertencias_estimacion_ia_var.set("Advertencias estimación IA experimental: -")
         self._actualizar_resumen_global()
 
     @staticmethod
@@ -1376,10 +1513,214 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_validacion_ia,
             self.btn_validar_lote_ia,
             self.btn_usar_solo_aptas_ia,
+            self.btn_estimacion_calibres_ia,
             self.btn_preparar_analisis,
             self.btn_ejecutar_flujo,
         ):
             btn.config(state=state)
+
+    @staticmethod
+    def _build_distribucion_texto(distribucion: list[dict[str, Any]]) -> str:
+        if not distribucion:
+            return "-"
+        partes = [f"{item['calibre']}:{item['porcentaje']:.1f}%" for item in distribucion if item.get("calibre")]
+        return " | ".join(partes) if partes else "-"
+
+    def _pintar_resultados_estimacion_ia(self) -> None:
+        self._limpiar_resultados_estimacion_ia()
+        resultados = self._get_estimacion_resultados_muestra_actual()
+        if not resultados:
+            return
+
+        aptas = 0
+        conf_values: list[float] = []
+        advertencias: list[str] = []
+        consolidado: dict[str, float] = {}
+        count_distribucion = 0
+
+        for id_foto in sorted(resultados.keys()):
+            row = resultados[id_foto]
+            if row.get("error"):
+                estado = row.get("estado", "Error")
+            else:
+                estado = "OK"
+                if row.get("apta_para_estimacion") == "Sí":
+                    aptas += 1
+                    for item in row.get("distribucion", []):
+                        calibre = str(item.get("calibre", "")).strip()
+                        pct = self._confianza_a_float(item.get("porcentaje"))
+                        if calibre and pct is not None:
+                            consolidado[calibre] = consolidado.get(calibre, 0.0) + pct
+                    count_distribucion += 1
+                for advertencia in row.get("advertencias", []):
+                    texto = str(advertencia).strip()
+                    if texto:
+                        advertencias.append(texto)
+
+            conf = self._confianza_a_float(row.get("confianza"))
+            if conf is not None:
+                conf_values.append(conf)
+
+            self.tree_estimacion_ia.insert(
+                "",
+                "end",
+                iid=f"est_{id_foto}",
+                values=(
+                    id_foto,
+                    row.get("apta_para_estimacion", "-"),
+                    row.get("confianza", "-"),
+                    row.get("frutos_visibles_estimados", "-"),
+                    row.get("calibre_dominante", "-"),
+                    self._build_distribucion_texto(row.get("distribucion", [])),
+                    estado if not row.get("error") else row.get("estado", "Error"),
+                ),
+            )
+
+        confianza_media = f"{(sum(conf_values) / len(conf_values)):.2f}" if conf_values else "-"
+        consolidado_texto = "-"
+        if consolidado and count_distribucion > 0:
+            promedio = {k: v / count_distribucion for k, v in consolidado.items()}
+            total_prom = sum(promedio.values())
+            if total_prom > 0:
+                norm = {k: (v * 100.0 / total_prom) for k, v in promedio.items()}
+                partes = [f"{k}:{norm[k]:.1f}%" for k in sorted(norm.keys())]
+                consolidado_texto = " | ".join(partes)
+        self.resumen_estimacion_ia_var.set(
+            "Estimación IA experimental: "
+            f"evaluadas={len(resultados)} | aptas={aptas} | confianza media={confianza_media} | "
+            f"distribución consolidada={consolidado_texto}"
+        )
+        advertencias_unicas = []
+        for adv in advertencias:
+            if adv not in advertencias_unicas:
+                advertencias_unicas.append(adv)
+        self.advertencias_estimacion_ia_var.set(
+            "Advertencias estimación IA experimental: "
+            + (" | ".join(advertencias_unicas[:5]) if advertencias_unicas else "-")
+        )
+        self._actualizar_resumen_global()
+
+    def _ejecutar_estimacion_calibres_ia(self) -> None:
+        if self._ai_estimacion_en_curso or self._ai_lote_en_curso or self._ai_validacion_en_curso:
+            return
+        if not self._current_muestra_id:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para estimación IA experimental.", parent=self)
+            return
+
+        ids_seleccionadas = set(self._selected_fotos_by_muestra.get(self._current_muestra_id, set()))
+        if not ids_seleccionadas:
+            messagebox.showwarning("Obtención calibres", "No hay fotos seleccionadas.", parent=self)
+            return
+
+        resultados_ia = self._get_ia_resultados_muestra_actual()
+        ids_aptas_ia = {
+            id_foto
+            for id_foto in ids_seleccionadas
+            if resultados_ia.get(id_foto) and not resultados_ia[id_foto].get("error") and resultados_ia[id_foto].get("apta") == "Sí"
+        }
+        if not ids_aptas_ia:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "No hay fotos aptas IA en la selección actual. Ejecute primero 'Validar lote IA'.",
+                parent=self,
+            )
+            return
+
+        ids_candidatas = set(ids_aptas_ia)
+        if self._deteccion_resultados:
+            ids_candidatas = {
+                id_foto
+                for id_foto in ids_candidatas
+                if self._deteccion_resultados.get(id_foto) and self._deteccion_resultados[id_foto].valid_for_next_step
+            }
+            if not ids_candidatas:
+                messagebox.showwarning(
+                    "Obtención calibres",
+                    "Existe resultado de patrón, pero ninguna foto apta IA tiene patrón válido.",
+                    parent=self,
+                )
+                return
+
+        cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+        muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
+        cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
+        rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
+        diametro_patron = self._config.diametro_patron_mm if self._config else 94.0
+        service_url, _source, resolve_error = self.data_service.resolve_url_servicio_ia()
+        if not service_url:
+            messagebox.showerror("Obtención calibres", f"No hay URL de servicio IA: {resolve_error or '-'}", parent=self)
+            return
+
+        self._ai_estimacion_en_curso = True
+        self._set_controles_lote_ia_habilitados(False)
+        self.estado_var.set(f"Estimación IA experimental 0/{len(ids_candidatas)}...")
+        resultados_estimacion = self._get_estimacion_resultados_muestra_actual()
+        resultados_estimacion.clear()
+
+        contexto_base = {
+            "tipo_tarea": "estimacion_calibres_experimental",
+            "cultivo": cultivo,
+            "diametro_patron_mm": diametro_patron,
+            "rangos_calibres": rangos,
+            "nota": (
+                "Estimación IA experimental para distribución aproximada por foto. "
+                "No sustituye análisis local ni resultado definitivo."
+            ),
+        }
+
+        def worker() -> None:
+            for idx, id_foto in enumerate(sorted(ids_candidatas), start=1):
+                row: dict[str, Any] = {
+                    "apta_para_estimacion": "-",
+                    "confianza": "-",
+                    "frutos_visibles_estimados": "-",
+                    "calibre_dominante": "-",
+                    "distribucion": [],
+                    "advertencias": [],
+                    "resumen": "-",
+                    "estado": "",
+                    "error": True,
+                }
+                try:
+                    card = cards_by_id.get(id_foto)
+                    if not card:
+                        raise ValueError("Foto no cargada en memoria.")
+                    ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+                    image_url_for_ai = self._build_image_url_for_ai(ruta_local)
+                    if not image_url_for_ai:
+                        raise ValueError("No se pudo construir image_url.")
+                    contexto = dict(contexto_base)
+                    contexto["id_foto"] = id_foto
+                    contexto["image_url"] = image_url_for_ai
+                    result = call_analyze_image(
+                        server_url=service_url,
+                        image_url=image_url_for_ai,
+                        task="estimacion_calibres",
+                        context=json.dumps(contexto, ensure_ascii=False),
+                        timeout_seconds=30,
+                    )
+                    parsed = self._parse_estimacion_ia_result(result)
+                    row.update(parsed)
+                    row["estado"] = "OK"
+                    row["error"] = False
+                    row["raw_result"] = result
+                except Exception as exc:  # noqa: BLE001
+                    row["estado"] = str(exc)
+                    row["error"] = True
+                finally:
+                    resultados_estimacion[id_foto] = row
+                    self.after(0, lambda i=idx: self.estado_var.set(f"Estimación IA experimental {i}/{len(ids_candidatas)}..."))
+                    self.after(0, self._pintar_resultados_estimacion_ia)
+
+            self.after(0, self._on_estimacion_ia_finalizada)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_estimacion_ia_finalizada(self) -> None:
+        self._ai_estimacion_en_curso = False
+        self._set_controles_lote_ia_habilitados(True)
+        self._pintar_resultados_estimacion_ia()
+        self.estado_var.set("Estimación IA experimental finalizada.")
 
     def _set_estado_paso_flujo(self, step_number: int, total_steps: int, text: str) -> None:
         self.estado_var.set(f"Paso {step_number}/{total_steps}: {text}")
@@ -1878,8 +2219,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._frutos_resultados.pop(id_foto, None)
         self._frutos_overlay_paths_by_foto.pop(id_foto, None)
         self._ia_validacion_resultados_by_muestra.setdefault(self._current_muestra_id, {}).pop(id_foto, None)
+        self._ia_estimacion_resultados_by_muestra.setdefault(self._current_muestra_id, {}).pop(id_foto, None)
         self._pintar_resultados_frutos()
         self._pintar_resultados_ia()
+        self._pintar_resultados_estimacion_ia()
         self._actualizar_resumen_fotos()
 
     def _actualizar_resumen_global(self) -> None:
@@ -1926,6 +2269,14 @@ class ObtencionCalibresWindow(BaseToolWindow):
             f"Fotos aptas IA: {aptas_ia} | Fotos patrón válido: {patrones_validos} | Fotos analizadas: {fotos_analizadas} | "
             f"Frutos válidos: {frutos_validos}"
         )
+        resultados_estimacion = self._get_estimacion_resultados_muestra_actual()
+        if resultados_estimacion:
+            aptas_estimacion = sum(
+                1 for row in resultados_estimacion.values() if not row.get("error") and row.get("apta_para_estimacion") == "Sí"
+            )
+            self.resumen_global_var.set(
+                f"{self.resumen_global_var.get()} | Estimación IA experimental apta: {aptas_estimacion}/{len(resultados_estimacion)}"
+            )
         if hasattr(self, "resumen_fases_var"):
             ia_estado = "pendiente"
             if resultados_ia:
@@ -1969,9 +2320,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
         self._ia_validacion_resultados_by_muestra[self._current_muestra_id] = {}
+        self._ia_estimacion_resultados_by_muestra[self._current_muestra_id] = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
         self._limpiar_resultados_ia()
+        self._limpiar_resultados_estimacion_ia()
         self._render_cards(self._current_cards)
 
     def _deseleccionar_todas(self) -> None:
@@ -1983,9 +2336,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
         self._ia_validacion_resultados_by_muestra[self._current_muestra_id] = {}
+        self._ia_estimacion_resultados_by_muestra[self._current_muestra_id] = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
         self._limpiar_resultados_ia()
+        self._limpiar_resultados_estimacion_ia()
         self._render_cards(self._current_cards)
 
     def _invertir_seleccion(self) -> None:
@@ -2000,9 +2355,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
         self._ia_validacion_resultados_by_muestra[self._current_muestra_id] = {}
+        self._ia_estimacion_resultados_by_muestra[self._current_muestra_id] = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
         self._limpiar_resultados_ia()
+        self._limpiar_resultados_estimacion_ia()
         self._render_cards(self._current_cards)
 
     def _abrir_vista_ampliada(self, card: dict[str, Any]) -> None:
