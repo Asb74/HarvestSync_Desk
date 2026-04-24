@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import socket
+import sqlite3
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,9 @@ class OpenAIServiceError(RuntimeError):
 
 
 class OpenAIGateway:
+    PROMPTS_DB_ENV = "HARVESTSYNC_CALIBRES_IA_DB_PATH"
+    PROMPTS_DB_DEFAULT_PATH = r"\\Personal\C\BasesSQLite\DBcalibres_ia.sqlite"
+
     def __init__(
         self,
         *,
@@ -30,6 +36,11 @@ class OpenAIGateway:
         self.timeout_seconds = timeout_seconds
         self.base_url = base_url.rstrip("/")
         self.logger = logging.getLogger("harvestsync.internal_ai.gateway")
+        self.prompts_db_path = Path(os.getenv(self.PROMPTS_DB_ENV, self.PROMPTS_DB_DEFAULT_PATH))
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def _read_api_key(self) -> str:
         if not self.api_key_path.exists():
@@ -42,7 +53,7 @@ class OpenAIGateway:
         return api_key
 
     @staticmethod
-    def _build_prompt(task: str, context: str) -> str:
+    def _fallback_prompt(task: str, context: str) -> str:
         if task == "validacion_foto":
             return (
                 "Eres un asistente experto en control de calidad agrícola para naranjas.\n"
@@ -103,8 +114,209 @@ class OpenAIGateway:
         )
         return f"{base_prompt} Tarea={task}. Contexto={context or 'sin contexto'}"
 
-    def analyze_image(self, *, image_path: Path, task: str, context: str) -> dict[str, Any]:
+    def ensure_prompt_schema(self) -> None:
+        self.prompts_db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(self.prompts_db_path)) as conn:
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS prompts_ia (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task TEXT NOT NULL,
+                    cultivo TEXT NOT NULL,
+                    variedad TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    nombre TEXT,
+                    descripcion TEXT,
+                    texto_prompt TEXT NOT NULL,
+                    activo INTEGER DEFAULT 1,
+                    es_default INTEGER DEFAULT 0,
+                    fecha_creacion TEXT,
+                    fecha_actualizacion TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_prompts_ia_task_cultivo_variedad_version "
+                "ON prompts_ia(task, cultivo, variedad, prompt_version)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_task ON prompts_ia(task)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_cultivo ON prompts_ia(cultivo)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_variedad ON prompts_ia(variedad)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_activo ON prompts_ia(activo)")
+            conn.commit()
+
+    def seed_prompts_if_empty(self) -> None:
+        now = self._utc_now_iso()
+        with sqlite3.connect(str(self.prompts_db_path)) as conn:
+            count = int(conn.execute("SELECT COUNT(*) FROM prompts_ia").fetchone()[0] or 0)
+            if count > 0:
+                return
+            seed_rows = [
+                (
+                    "estimacion_calibres",
+                    "CITRICOS",
+                    "VALENCIA DELTA",
+                    "v2_corrige_sesgo_valencia_delta",
+                    "Estimación cítricos Valencia Delta (corrección sesgo)",
+                    "Ajustado para corregir sobreestimación CAL8/CAL9 e infraestimación CAL4/CAL5.",
+                    (
+                        "Eres un asistente experto en estimación visual agrícola para cítricos en box.\n"
+                        "Variedad objetivo: VALENCIA DELTA.\n"
+                        "Objetivo: estimar distribución APROXIMADA de calibres por foto.\n"
+                        "Corrige explícitamente el sesgo histórico:\n"
+                        "- evitar sobreestimación de CAL8/CAL9;\n"
+                        "- evitar infraestimación de CAL4/CAL5;\n"
+                        "- manejar oclusión media y frutos parcialmente visibles sin invalidar automáticamente.\n"
+                        "Usa solo calibres del contexto. Devuelve JSON estricto sin markdown con:\n"
+                        "{"
+                        "\"apta_para_estimacion\": true/false,"
+                        "\"confianza\": 0-100,"
+                        "\"frutos_visibles_estimados\": 0,"
+                        "\"calibre_dominante\": \"texto_o_null\","
+                        "\"distribucion\": [{\"calibre\": \"texto\", \"porcentaje\": 0-100}],"
+                        "\"advertencias\": [\"...\"],"
+                        "\"resumen\": \"texto breve\""
+                        "}\n"
+                        "Reglas: suma ~100, no inventar calibres fuera del contexto."
+                    ),
+                    1,
+                    0,
+                    now,
+                    now,
+                ),
+                (
+                    "estimacion_calibres",
+                    "CITRICOS",
+                    "*",
+                    "v1_citricos_generico",
+                    "Estimación cítricos genérico",
+                    "Prompt base para cítricos cuando no hay ajuste específico de variedad.",
+                    (
+                        "Eres un asistente experto en estimación visual agrícola para cítricos en box.\n"
+                        "Objetivo: estimar distribución APROXIMADA de calibres por foto, considerando oclusión y perspectiva.\n"
+                        "Usa los rangos de calibres del contexto y evita precisión falsa.\n"
+                        "Devuelve JSON estricto sin markdown con:\n"
+                        "{"
+                        "\"apta_para_estimacion\": true/false,"
+                        "\"confianza\": 0-100,"
+                        "\"frutos_visibles_estimados\": 0,"
+                        "\"calibre_dominante\": \"texto_o_null\","
+                        "\"distribucion\": [{\"calibre\": \"texto\", \"porcentaje\": 0-100}],"
+                        "\"advertencias\": [\"...\"],"
+                        "\"resumen\": \"texto breve\""
+                        "}"
+                    ),
+                    1,
+                    1,
+                    now,
+                    now,
+                ),
+                (
+                    "estimacion_calibres",
+                    "*",
+                    "*",
+                    "v1_generico_calibres",
+                    "Estimación calibres genérico",
+                    "Prompt genérico para cualquier cultivo sin configuración específica.",
+                    (
+                        "Eres un asistente de estimación visual agrícola en imágenes de fruta en box.\n"
+                        "Objetivo: estimar distribución aproximada de calibres con cautela y advertencias claras.\n"
+                        "Usa únicamente los rangos del contexto cuando estén disponibles.\n"
+                        "Devuelve JSON estricto sin markdown con campos:\n"
+                        "{"
+                        "\"apta_para_estimacion\": true/false,"
+                        "\"confianza\": 0-100,"
+                        "\"frutos_visibles_estimados\": 0,"
+                        "\"calibre_dominante\": \"texto_o_null\","
+                        "\"distribucion\": [{\"calibre\": \"texto\", \"porcentaje\": 0-100}],"
+                        "\"advertencias\": [\"...\"],"
+                        "\"resumen\": \"texto breve\""
+                        "}"
+                    ),
+                    1,
+                    1,
+                    now,
+                    now,
+                ),
+            ]
+            conn.executemany(
+                """
+                INSERT INTO prompts_ia (
+                    task, cultivo, variedad, prompt_version, nombre, descripcion, texto_prompt,
+                    activo, es_default, fecha_creacion, fecha_actualizacion
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                seed_rows,
+            )
+            conn.commit()
+
+    def resolve_prompt(
+        self,
+        *,
+        task: str,
+        cultivo: str,
+        variedad: str,
+        context: str,
+    ) -> dict[str, str]:
+        cultivo_norm = (cultivo or "*").strip().upper() or "*"
+        variedad_norm = (variedad or "*").strip().upper() or "*"
+        task_norm = task.strip()
+
+        self.ensure_prompt_schema()
+        self.seed_prompts_if_empty()
+        with sqlite3.connect(str(self.prompts_db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            levels = [
+                (cultivo_norm, variedad_norm, "sqlite_exact"),
+                (cultivo_norm, "*", "sqlite_cultivo_default"),
+                ("*", "*", "sqlite_global_default"),
+            ]
+            for cultivo_q, variedad_q, source in levels:
+                row = conn.execute(
+                    """
+                    SELECT texto_prompt, prompt_version
+                    FROM prompts_ia
+                    WHERE task = ? AND cultivo = ? AND variedad = ? AND activo = 1
+                    ORDER BY COALESCE(fecha_actualizacion, ''), id DESC
+                    LIMIT 1
+                    """,
+                    (task_norm, cultivo_q, variedad_q),
+                ).fetchone()
+                if row:
+                    prompt = f"{row['texto_prompt']}\nTarea={task_norm}. Contexto={context or 'sin contexto'}"
+                    return {
+                        "prompt_text": prompt,
+                        "prompt_version": str(row["prompt_version"]),
+                        "prompt_source": source,
+                        "cultivo": cultivo_norm,
+                        "variedad": variedad_norm,
+                    }
+        return {
+            "prompt_text": self._fallback_prompt(task_norm, context),
+            "prompt_version": "fallback_internal_v1",
+            "prompt_source": "fallback_internal",
+            "cultivo": cultivo_norm,
+            "variedad": variedad_norm,
+        }
+
+    def analyze_image(self, *, image_path: Path, task: str, context: str, cultivo: str = "", variedad: str = "") -> dict[str, Any]:
         api_key = self._read_api_key()
+        prompt_version = "fallback_internal_v1"
+        prompt_source = "fallback_internal"
+        cultivo_out = (cultivo or "*").strip().upper() or "*"
+        variedad_out = (variedad or "*").strip().upper() or "*"
+        prompt_text = self._fallback_prompt(task, context)
+        try:
+            resolved = self.resolve_prompt(task=task, cultivo=cultivo, variedad=variedad, context=context)
+            prompt_text = resolved["prompt_text"]
+            prompt_version = resolved["prompt_version"]
+            prompt_source = resolved["prompt_source"]
+            cultivo_out = resolved["cultivo"]
+            variedad_out = resolved["variedad"]
+        except Exception as exc:  # pragma: no cover - fallback defensivo
+            self.logger.warning("prompt resolve fallback interno por error de sqlite: %s", exc)
+
         self.logger.info("gateway: inicio lectura imagen path=%s", image_path)
         image_bytes = image_path.read_bytes()
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -115,7 +327,7 @@ class OpenAIGateway:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": self._build_prompt(task, context)},
+                        {"type": "input_text", "text": prompt_text},
                         {
                             "type": "input_image",
                             "image_url": f"data:image/jpeg;base64,{image_b64}",
@@ -154,4 +366,8 @@ class OpenAIGateway:
             "model": parsed.get("model", self.model),
             "output_text": parsed.get("output_text", ""),
             "raw_id": parsed.get("id", ""),
+            "prompt_version": prompt_version,
+            "prompt_source": prompt_source,
+            "cultivo": cultivo_out,
+            "variedad": variedad_out,
         }

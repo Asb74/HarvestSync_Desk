@@ -41,6 +41,20 @@ _config: Settings | None = None
 _gateway: OpenAIGateway | None = None
 
 
+def _extract_cultivo_variedad_from_context(context: str) -> tuple[str, str]:
+    if not isinstance(context, str) or not context.strip():
+        return "", ""
+    try:
+        parsed = json.loads(context)
+    except json.JSONDecodeError:
+        return "", ""
+    if not isinstance(parsed, dict):
+        return "", ""
+    cultivo = str(parsed.get("cultivo", "") or "").strip()
+    variedad = str(parsed.get("variedad", "") or "").strip()
+    return cultivo, variedad
+
+
 def get_config() -> Settings:
     global _config
     if _config is None:
@@ -110,7 +124,9 @@ def analyze_image() -> Any:
       "image_url": "http://servidor-fotos/fotos/lote/foto.jpg",  # recomendado
       "image_path": "C:/ruta/a/imagen.jpg",  # compatibilidad opcional
       "task": "validacion_foto",
-      "context": "texto opcional"
+      "context": "texto opcional",
+      "cultivo": "CITRICOS",
+      "variedad": "VALENCIA DELTA"
     }
     """
     request_id = uuid.uuid4().hex[:10]
@@ -127,12 +143,22 @@ def analyze_image() -> Any:
     image_path_value = payload.get("image_path")
     task = payload.get("task", "analisis_general")
     context = payload.get("context", "")
+    cultivo = str(payload.get("cultivo", "") or "").strip()
+    variedad = str(payload.get("variedad", "") or "").strip()
+    if not cultivo or not variedad:
+        cultivo_ctx, variedad_ctx = _extract_cultivo_variedad_from_context(context)
+        if not cultivo:
+            cultivo = cultivo_ctx
+        if not variedad:
+            variedad = variedad_ctx
     logger.info(
-        "analyze_image: payload parseado request_id=%s image_url=%r image_path=%r task=%r context_len=%s",
+        "analyze_image: payload parseado request_id=%s image_url=%r image_path=%r task=%r cultivo=%r variedad=%r context_len=%s",
         request_id,
         image_url_value,
         image_path_value,
         task,
+        cultivo,
+        variedad,
         len(context) if isinstance(context, str) else "invalid",
     )
 
@@ -209,6 +235,8 @@ def analyze_image() -> Any:
             image_path=image_path,
             task=task.strip(),
             context=context.strip(),
+            cultivo=cultivo,
+            variedad=variedad,
         )
         elapsed = time.perf_counter() - start_ts
         logger.info("analyze_image: fin llamada OpenAI request_id=%s duracion=%.2fs", request_id, elapsed)

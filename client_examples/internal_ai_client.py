@@ -23,6 +23,8 @@ def call_analyze_image(
     image_url: str = "",
     task: str,
     context: str = "",
+    cultivo: str = "",
+    variedad: str = "",
     timeout_seconds: int = 20,
     internal_token: str = "",
 ) -> dict[str, Any]:
@@ -30,6 +32,10 @@ def call_analyze_image(
         "task": task,
         "context": context,
     }
+    if isinstance(cultivo, str) and cultivo.strip():
+        body["cultivo"] = cultivo.strip()
+    if isinstance(variedad, str) and variedad.strip():
+        body["variedad"] = variedad.strip()
     if isinstance(image_url, str) and image_url.strip():
         body["image_url"] = image_url.strip()
     if isinstance(image_path, str) and image_path.strip():
