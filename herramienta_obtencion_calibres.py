@@ -227,10 +227,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         container.rowconfigure(2, weight=1)
         container.columnconfigure(0, weight=1)
-        container.columnconfigure(1, weight=2)
 
-        filtros = ttk.LabelFrame(container, text="1) Búsqueda por boleta", padding=10)
-        filtros.grid(row=0, column=0, columnspan=2, sticky="ew")
+        filtros = ttk.LabelFrame(container, text="Cabecera operativa", padding=10)
+        filtros.grid(row=0, column=0, sticky="ew")
         filtros.columnconfigure(1, weight=1)
 
         ttk.Label(filtros, text="Boleta:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -246,10 +245,29 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ttk.Label(filtros, text="Diámetro patrón (mm):").grid(row=1, column=2, sticky="e", padx=(12, 6), pady=4)
         ttk.Label(filtros, textvariable=self.diametro_var).grid(row=1, column=3, sticky="w", pady=4)
 
-        ttk.Label(container, textvariable=self.estado_var, foreground="#34495e").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+        ttk.Label(container, textvariable=self.estado_var, foreground="#34495e").grid(row=1, column=0, sticky="ew", pady=(8, 8))
 
-        frame_muestras = ttk.LabelFrame(container, text="2) Muestras asociadas", padding=8)
-        frame_muestras.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
+        notebook = ttk.Notebook(container)
+        notebook.grid(row=2, column=0, sticky="nsew")
+
+        tab_muestras_fotos = ttk.Frame(notebook, padding=8)
+        tab_validacion_ia = ttk.Frame(notebook, padding=8)
+        tab_patron_escala = ttk.Frame(notebook, padding=8)
+        tab_frutos_calibres = ttk.Frame(notebook, padding=8)
+        tab_resumen = ttk.Frame(notebook, padding=8)
+
+        notebook.add(tab_muestras_fotos, text="Muestras y fotos")
+        notebook.add(tab_validacion_ia, text="Validación IA")
+        notebook.add(tab_patron_escala, text="Patrón y escala")
+        notebook.add(tab_frutos_calibres, text="Frutos y calibres")
+        notebook.add(tab_resumen, text="Resumen")
+
+        tab_muestras_fotos.rowconfigure(1, weight=1)
+        tab_muestras_fotos.columnconfigure(0, weight=1)
+        tab_muestras_fotos.columnconfigure(1, weight=2)
+
+        frame_muestras = ttk.LabelFrame(tab_muestras_fotos, text="Muestras asociadas", padding=8)
+        frame_muestras.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         frame_muestras.rowconfigure(0, weight=1)
         frame_muestras.columnconfigure(0, weight=1)
 
@@ -282,71 +300,28 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.tree_muestras.configure(yscrollcommand=scroll_muestras.set)
         self.tree_muestras.bind("<<TreeviewSelect>>", self._on_select_muestra)
 
-        frame_fotos = ttk.LabelFrame(container, text="3) Fotos de 'Datos Calibres'", padding=8)
-        frame_fotos.grid(row=2, column=1, sticky="nsew")
-        frame_fotos.rowconfigure(3, weight=1)
+        frame_fotos = ttk.LabelFrame(tab_muestras_fotos, text="Fotos de 'Datos Calibres'", padding=8)
+        frame_fotos.grid(row=1, column=1, sticky="nsew")
+        frame_fotos.rowconfigure(2, weight=1)
         frame_fotos.columnconfigure(0, weight=1)
 
-        toolbar = ttk.Frame(frame_fotos)
-        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        toolbar.columnconfigure(6, weight=1)
+        toolbar = ttk.Frame(tab_muestras_fotos)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        toolbar.columnconfigure(8, weight=1)
         self.btn_seleccionar_todas = ttk.Button(toolbar, text="Seleccionar todas", command=self._seleccionar_todas)
         self.btn_seleccionar_todas.grid(row=0, column=0, padx=(0, 6))
         self.btn_deseleccionar_todas = ttk.Button(toolbar, text="Deseleccionar todas", command=self._deseleccionar_todas)
         self.btn_deseleccionar_todas.grid(row=0, column=1, padx=(0, 6))
         self.btn_invertir_seleccion = ttk.Button(toolbar, text="Invertir selección", command=self._invertir_seleccion)
         self.btn_invertir_seleccion.grid(row=0, column=2, padx=(0, 6))
-        self.btn_detectar_patron = ttk.Button(toolbar, text="🎯 Detectar patrón", command=self._detectar_patron_y_escala)
-        self.btn_detectar_patron.grid(row=0, column=3, padx=(0, 6))
-        self.btn_analizar_frutos = ttk.Button(toolbar, text="🍊 Analizar frutos", command=self._analizar_frutos)
-        self.btn_analizar_frutos.grid(row=0, column=4, padx=(0, 6))
-        self.btn_validacion_ia = ttk.Button(toolbar, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
-        self.btn_validacion_ia.grid(row=0, column=5, padx=(0, 6))
-        self.btn_validar_lote_ia = ttk.Button(toolbar, text="🤖 Validar lote IA", command=self._validar_lote_ia)
-        self.btn_validar_lote_ia.grid(row=0, column=6, padx=(0, 6))
-        self.btn_usar_solo_aptas_ia = ttk.Button(toolbar, text="✅ Usar solo aptas IA", command=self._usar_solo_aptas_ia)
-        self.btn_usar_solo_aptas_ia.grid(row=0, column=7, padx=(0, 6))
-        self.btn_preparar_analisis = ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis)
-        self.btn_preparar_analisis.grid(row=0, column=8, sticky="e")
 
         self.resumen_fotos_var = tk.StringVar(value="Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
         ttk.Label(frame_fotos, textvariable=self.resumen_fotos_var, foreground="#34495e").grid(row=1, column=0, sticky="w", pady=(0, 6))
 
-        resultados = ttk.LabelFrame(frame_fotos, text="4) Detección patrón y escala", padding=6)
-        resultados.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        resultados.columnconfigure(0, weight=1)
-
-        self.tree_resultados = ttk.Treeview(
-            resultados,
-            columns=("id_foto", "detectado", "diametro_px", "mm_px", "valida", "estado"),
-            show="headings",
-            height=5,
-        )
-        headers = {
-            "id_foto": "Foto",
-            "detectado": "Patrón",
-            "diametro_px": "Diámetro (px)",
-            "mm_px": "mm/px",
-            "valida": "Válida",
-            "estado": "Estado",
-        }
-        widths = {"id_foto": 190, "detectado": 80, "diametro_px": 110, "mm_px": 110, "valida": 70, "estado": 330}
-        for col in headers:
-            self.tree_resultados.heading(col, text=headers[col])
-            self.tree_resultados.column(col, width=widths[col], anchor="w")
-        self.tree_resultados.grid(row=0, column=0, sticky="ew")
-        self.tree_resultados.bind("<Double-1>", self._on_double_click_resultado)
-        ttk.Button(resultados, text="👁 Ver validación visual", command=self._abrir_overlay_resultado_actual).grid(
-            row=1,
-            column=0,
-            sticky="e",
-            pady=(6, 0),
-        )
-
         self.canvas_fotos = tk.Canvas(frame_fotos, highlightthickness=0)
-        self.canvas_fotos.grid(row=3, column=0, sticky="nsew")
+        self.canvas_fotos.grid(row=2, column=0, sticky="nsew")
         self.scroll_fotos = ttk.Scrollbar(frame_fotos, orient="vertical", command=self.canvas_fotos.yview)
-        self.scroll_fotos.grid(row=3, column=1, sticky="ns")
+        self.scroll_fotos.grid(row=2, column=1, sticky="ns")
         self.canvas_fotos.configure(yscrollcommand=self.scroll_fotos.set)
 
         self.frame_fotos_content = ttk.Frame(self.canvas_fotos)
@@ -355,41 +330,28 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.frame_fotos_content.bind("<Configure>", lambda _: self.canvas_fotos.configure(scrollregion=self.canvas_fotos.bbox("all")))
         self.canvas_fotos.bind("<Configure>", self._sync_fotos_width)
 
-        frutos = ttk.LabelFrame(frame_fotos, text="5) Estimación prudente de frutos por calibre", padding=6)
-        frutos.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        frutos.columnconfigure(0, weight=1)
+        tab_validacion_ia.rowconfigure(1, weight=1)
+        tab_validacion_ia.columnconfigure(0, weight=1)
+        toolbar_ia = ttk.Frame(tab_validacion_ia)
+        toolbar_ia.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        toolbar_ia.columnconfigure(3, weight=1)
+        self.btn_validacion_ia = ttk.Button(toolbar_ia, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
+        self.btn_validacion_ia.grid(row=0, column=0, padx=(0, 6))
+        self.btn_validar_lote_ia = ttk.Button(toolbar_ia, text="🤖 Validar lote IA", command=self._validar_lote_ia)
+        self.btn_validar_lote_ia.grid(row=0, column=1, padx=(0, 6))
+        self.btn_usar_solo_aptas_ia = ttk.Button(toolbar_ia, text="✅ Usar solo aptas IA", command=self._usar_solo_aptas_ia)
+        self.btn_usar_solo_aptas_ia.grid(row=0, column=2, padx=(0, 6))
 
-        self.tree_frutos_foto = ttk.Treeview(
-            frutos,
-            columns=("id_foto", "detectados", "validos", "descartados", "descarte_pct", "estado"),
-            show="headings",
-            height=4,
-        )
-        headers_frutos = {
-            "id_foto": "Foto",
-            "detectados": "Detectados",
-            "validos": "Válidos",
-            "descartados": "Descartados",
-            "descarte_pct": "% descarte",
-            "estado": "Estado",
-        }
-        widths_frutos = {"id_foto": 180, "detectados": 90, "validos": 80, "descartados": 95, "descarte_pct": 95, "estado": 340}
-        for col in headers_frutos:
-            self.tree_frutos_foto.heading(col, text=headers_frutos[col])
-            self.tree_frutos_foto.column(col, width=widths_frutos[col], anchor="w")
-        self.tree_frutos_foto.grid(row=0, column=0, sticky="ew")
-        self.tree_frutos_foto.bind("<Double-1>", self._abrir_overlay_frutos_actual)
-        ttk.Button(frutos, text="👁 Ver overlay frutos", command=self._abrir_overlay_frutos_actual).grid(row=1, column=0, sticky="e", pady=(6, 0))
-
-        ia_frame = ttk.LabelFrame(frame_fotos, text="6) Validación IA por lote", padding=6)
-        ia_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
+        ia_frame.grid(row=1, column=0, sticky="nsew")
+        ia_frame.rowconfigure(0, weight=1)
         ia_frame.columnconfigure(0, weight=1)
 
         self.tree_validacion_ia = ttk.Treeview(
             ia_frame,
             columns=("id_foto", "apta", "confianza", "oclusion", "patron_visible", "estado"),
             show="headings",
-            height=4,
+            height=6,
         )
         headers_ia = {
             "id_foto": "Foto",
@@ -403,13 +365,125 @@ class ObtencionCalibresWindow(BaseToolWindow):
         for col in headers_ia:
             self.tree_validacion_ia.heading(col, text=headers_ia[col])
             self.tree_validacion_ia.column(col, width=widths_ia[col], anchor="w")
-        self.tree_validacion_ia.grid(row=0, column=0, sticky="ew")
+        self.tree_validacion_ia.grid(row=0, column=0, sticky="nsew")
         self.resumen_ia_lote_var = tk.StringVar(
             value="IA lote: evaluadas=0 | aptas=0 | no aptas=0 | errores=0 | confianza media=-"
         )
         ttk.Label(ia_frame, textvariable=self.resumen_ia_lote_var, foreground="#34495e").grid(
             row=1, column=0, sticky="w", pady=(6, 0)
         )
+
+        tab_patron_escala.rowconfigure(1, weight=1)
+        tab_patron_escala.columnconfigure(0, weight=1)
+        toolbar_patron = ttk.Frame(tab_patron_escala)
+        toolbar_patron.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        toolbar_patron.columnconfigure(2, weight=1)
+        self.btn_detectar_patron = ttk.Button(toolbar_patron, text="🎯 Detectar patrón", command=self._detectar_patron_y_escala)
+        self.btn_detectar_patron.grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(toolbar_patron, text="👁 Ver validación visual", command=self._abrir_overlay_resultado_actual).grid(
+            row=0,
+            column=1,
+            padx=(0, 6),
+        )
+
+        resultados = ttk.LabelFrame(tab_patron_escala, text="Detección patrón y escala", padding=6)
+        resultados.grid(row=1, column=0, sticky="nsew")
+        resultados.rowconfigure(0, weight=1)
+        resultados.columnconfigure(0, weight=1)
+
+        self.tree_resultados = ttk.Treeview(
+            resultados,
+            columns=("id_foto", "detectado", "diametro_px", "mm_px", "valida", "estado"),
+            show="headings",
+            height=10,
+        )
+        headers = {
+            "id_foto": "Foto",
+            "detectado": "Patrón",
+            "diametro_px": "Diámetro (px)",
+            "mm_px": "mm/px",
+            "valida": "Válida",
+            "estado": "Estado",
+        }
+        widths = {"id_foto": 190, "detectado": 80, "diametro_px": 110, "mm_px": 110, "valida": 70, "estado": 330}
+        for col in headers:
+            self.tree_resultados.heading(col, text=headers[col])
+            self.tree_resultados.column(col, width=widths[col], anchor="w")
+        self.tree_resultados.grid(row=0, column=0, sticky="nsew")
+        self.tree_resultados.bind("<Double-1>", self._on_double_click_resultado)
+
+        tab_frutos_calibres.rowconfigure(1, weight=1)
+        tab_frutos_calibres.columnconfigure(0, weight=1)
+        toolbar_frutos = ttk.Frame(tab_frutos_calibres)
+        toolbar_frutos.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        toolbar_frutos.columnconfigure(2, weight=1)
+        self.btn_analizar_frutos = ttk.Button(toolbar_frutos, text="🍊 Analizar frutos", command=self._analizar_frutos)
+        self.btn_analizar_frutos.grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(toolbar_frutos, text="👁 Ver overlay frutos", command=self._abrir_overlay_frutos_actual).grid(
+            row=0,
+            column=1,
+            padx=(0, 6),
+        )
+
+        frutos = ttk.LabelFrame(tab_frutos_calibres, text="Estimación prudente de frutos por calibre", padding=6)
+        frutos.grid(row=1, column=0, sticky="nsew")
+        frutos.rowconfigure(0, weight=1)
+        frutos.columnconfigure(0, weight=1)
+
+        self.tree_frutos_foto = ttk.Treeview(
+            frutos,
+            columns=("id_foto", "detectados", "validos", "descartados", "descarte_pct", "estado"),
+            show="headings",
+            height=10,
+        )
+        headers_frutos = {
+            "id_foto": "Foto",
+            "detectados": "Detectados",
+            "validos": "Válidos",
+            "descartados": "Descartados",
+            "descarte_pct": "% descarte",
+            "estado": "Estado",
+        }
+        widths_frutos = {"id_foto": 180, "detectados": 90, "validos": 80, "descartados": 95, "descarte_pct": 95, "estado": 340}
+        for col in headers_frutos:
+            self.tree_frutos_foto.heading(col, text=headers_frutos[col])
+            self.tree_frutos_foto.column(col, width=widths_frutos[col], anchor="w")
+        self.tree_frutos_foto.grid(row=0, column=0, sticky="nsew")
+        self.tree_frutos_foto.bind("<Double-1>", self._abrir_overlay_frutos_actual)
+
+        tab_resumen.columnconfigure(0, weight=1)
+        resumen_frame = ttk.LabelFrame(tab_resumen, text="Resumen global del análisis", padding=8)
+        resumen_frame.grid(row=0, column=0, sticky="new")
+        resumen_frame.columnconfigure(1, weight=1)
+
+        self.resumen_global_var = tk.StringVar(
+            value=(
+                "Fotos encontradas: 0 | Fotos seleccionadas: 0 | Fotos aptas IA: 0 | "
+                "Fotos patrón válido: 0 | Frutos válidos: 0"
+            )
+        )
+        ttk.Label(
+            resumen_frame,
+            textvariable=self.resumen_global_var,
+            foreground="#34495e",
+            wraplength=920,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        ttk.Label(resumen_frame, text="Estado IA lote:", font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="nw", padx=(0, 8))
+        ttk.Label(resumen_frame, textvariable=self.resumen_ia_lote_var, wraplength=920, justify="left").grid(row=1, column=1, sticky="w")
+
+        ttk.Button(tab_resumen, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(
+            row=1,
+            column=0,
+            sticky="e",
+            pady=(10, 0),
+        )
+
+        self.btn_preparar_analisis = ttk.Button(tab_muestras_fotos, text="🧮 Preparar análisis", command=self._preparar_analisis)
+        self.btn_preparar_analisis.grid(row=2, column=1, sticky="e", pady=(8, 0))
+
+        self._actualizar_resumen_global()
 
     def _sync_fotos_width(self, event: tk.Event) -> None:
         self.canvas_fotos.itemconfigure(self._fotos_window, width=event.width)
@@ -725,6 +799,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.tree_resultados.insert("", "end", iid=id_foto, values=(id_foto, detectado, diametro, mm_px, valida, estado))
         invalidas = max(total - validas, 0)
         self.estado_var.set(f"Detección ejecutada: {total} imagen(es), válidas={validas}, inválidas={invalidas}.")
+        self._actualizar_resumen_global()
 
     def _on_double_click_resultado(self, _: tk.Event) -> None:
         self._abrir_overlay_resultado_actual()
@@ -880,6 +955,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.estado_var.set(
             f"Análisis frutos: fotos={total}, fotos válidas={validas_foto}, frutos válidos={total_validos}, descartados={total_descartados}."
         )
+        self._actualizar_resumen_global()
 
     def _abrir_overlay_frutos_actual(self, _: tk.Event | None = None) -> None:
         selected = self.tree_frutos_foto.selection()
@@ -1202,6 +1278,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 self.tree_validacion_ia.delete(item)
         if hasattr(self, "resumen_ia_lote_var"):
             self.resumen_ia_lote_var.set("IA lote: evaluadas=0 | aptas=0 | no aptas=0 | errores=0 | confianza media=-")
+        self._actualizar_resumen_global()
 
     @staticmethod
     def _confianza_a_float(value: Any) -> float | None:
@@ -1258,6 +1335,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.resumen_ia_lote_var.set(
             f"IA lote: evaluadas={total} | aptas={aptas} | no aptas={no_aptas} | errores={errores} | confianza media={confianza_media}"
         )
+        self._actualizar_resumen_global()
 
     def _set_controles_lote_ia_habilitados(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -1534,9 +1612,43 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._pintar_resultados_ia()
         self._actualizar_resumen_fotos()
 
+    def _actualizar_resumen_global(self) -> None:
+        if not hasattr(self, "resumen_global_var"):
+            return
+        if not self._current_muestra_id:
+            self.resumen_global_var.set(
+                "Fotos encontradas: 0 | Fotos seleccionadas: 0 | Fotos aptas IA: 0 | Fotos patrón válido: 0 | Frutos válidos: 0"
+            )
+            return
+        total_fotos = len(self._fotos_by_muestra.get(self._current_muestra_id, []))
+        seleccionadas = self._selected_fotos_by_muestra.get(self._current_muestra_id, set())
+        total_seleccionadas = len(seleccionadas)
+        resultados_ia = self._get_ia_resultados_muestra_actual()
+        aptas_ia = sum(
+            1
+            for id_foto in seleccionadas
+            if resultados_ia.get(id_foto) and not resultados_ia[id_foto].get("error") and resultados_ia[id_foto].get("apta") == "Sí"
+        )
+        patrones_validos = sum(
+            1
+            for id_foto in seleccionadas
+            if self._deteccion_resultados.get(id_foto) and self._deteccion_resultados[id_foto].valid_for_next_step
+        )
+        frutos_validos = 0
+        for id_foto in seleccionadas:
+            res = self._frutos_resultados.get(id_foto)
+            if not res:
+                continue
+            frutos_validos += len([item for item in res.fruits if item.valid])
+        self.resumen_global_var.set(
+            f"Fotos encontradas: {total_fotos} | Fotos seleccionadas: {total_seleccionadas} | "
+            f"Fotos aptas IA: {aptas_ia} | Fotos patrón válido: {patrones_validos} | Frutos válidos: {frutos_validos}"
+        )
+
     def _actualizar_resumen_fotos(self) -> None:
         if not self._current_muestra_id:
             self.resumen_fotos_var.set("Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
+            self._actualizar_resumen_global()
             return
         total = len(self._fotos_by_muestra.get(self._current_muestra_id, []))
         seleccionadas = len(self._selected_fotos_by_muestra.get(self._current_muestra_id, set()))
@@ -1544,6 +1656,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.resumen_fotos_var.set(
             f"Fotos encontradas: {total} | Seleccionadas: {seleccionadas} | Excluidas: {excluidas}"
         )
+        self._actualizar_resumen_global()
 
     def _seleccionar_todas(self) -> None:
         if not self._current_muestra_id:
