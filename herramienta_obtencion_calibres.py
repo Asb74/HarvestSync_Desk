@@ -456,6 +456,151 @@ class CalibresIAHistoryRepository:
             conn.commit()
             return len(rows)
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        if not os.path.exists(self.db_path):
+            raise FileNotFoundError(f"No existe la base histórica IA: {self.db_path}")
+        uri = f"file:{Path(self.db_path).as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        return conn
+
+    @staticmethod
+    def _parse_tabla_no_existe(exc: sqlite3.OperationalError) -> None:
+        if "no such table" in str(exc).lower():
+            raise LookupError("La tabla comparaciones_calibres no existe en la base histórica IA.") from exc
+        raise exc
+
+    def list_comparisons(
+        self,
+        *,
+        boleta: str = "",
+        albaran: str = "",
+        variedad: str = "",
+        cultivo: str = "",
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        filtros_sql: list[str] = []
+        params: list[Any] = []
+        if boleta.strip():
+            filtros_sql.append("CAST(COALESCE(boleta, '') AS TEXT) LIKE ?")
+            params.append(f"%{boleta.strip()}%")
+        if albaran.strip():
+            filtros_sql.append("UPPER(COALESCE(albaran, '')) LIKE UPPER(?)")
+            params.append(f"%{albaran.strip()}%")
+        if variedad.strip():
+            filtros_sql.append("UPPER(COALESCE(variedad, '')) LIKE UPPER(?)")
+            params.append(f"%{variedad.strip()}%")
+        if cultivo.strip():
+            filtros_sql.append("UPPER(COALESCE(cultivo, '')) LIKE UPPER(?)")
+            params.append(f"%{cultivo.strip()}%")
+
+        where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
+        sql = f"""
+            SELECT
+                id,
+                fecha_registro,
+                boleta,
+                albaran,
+                variedad,
+                cultivo,
+                id_foto,
+                modelo_ia,
+                confianza_ia,
+                calibre_dominante_ia,
+                calibre_dominante_real,
+                error_absoluto_medio,
+                error_total_absoluto
+            FROM comparaciones_calibres
+            {where_sql}
+            ORDER BY datetime(fecha_registro) DESC, id DESC
+            LIMIT ?
+        """
+        params.append(max(1, int(limit)))
+        try:
+            with self._connect_readonly() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as exc:
+            self._parse_tabla_no_existe(exc)
+        return [dict(row) for row in rows]
+
+    def get_comparison_detail(self, comparison_id: int) -> dict[str, Any] | None:
+        sql = """
+            SELECT *
+            FROM comparaciones_calibres
+            WHERE id = ?
+            LIMIT 1
+        """
+        try:
+            with self._connect_readonly() as conn:
+                row = conn.execute(sql, (comparison_id,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            self._parse_tabla_no_existe(exc)
+        return dict(row) if row else None
+
+    def get_summary(
+        self,
+        *,
+        boleta: str = "",
+        albaran: str = "",
+        variedad: str = "",
+        cultivo: str = "",
+    ) -> dict[str, Any]:
+        filtros_sql: list[str] = []
+        params: list[Any] = []
+        if boleta.strip():
+            filtros_sql.append("CAST(COALESCE(boleta, '') AS TEXT) LIKE ?")
+            params.append(f"%{boleta.strip()}%")
+        if albaran.strip():
+            filtros_sql.append("UPPER(COALESCE(albaran, '')) LIKE UPPER(?)")
+            params.append(f"%{albaran.strip()}%")
+        if variedad.strip():
+            filtros_sql.append("UPPER(COALESCE(variedad, '')) LIKE UPPER(?)")
+            params.append(f"%{variedad.strip()}%")
+        if cultivo.strip():
+            filtros_sql.append("UPPER(COALESCE(cultivo, '')) LIKE UPPER(?)")
+            params.append(f"%{cultivo.strip()}%")
+        where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
+        sql_base = f"""
+            SELECT
+                COUNT(*) AS total_registros,
+                AVG(COALESCE(error_absoluto_medio, 0)) AS error_medio_global,
+                AVG(COALESCE(error_total_absoluto, 0)) AS error_total_medio
+            FROM comparaciones_calibres
+            {where_sql}
+        """
+        sql_dom_ia = f"""
+            SELECT calibre_dominante_ia, COUNT(*) AS total
+            FROM comparaciones_calibres
+            {where_sql}
+            GROUP BY calibre_dominante_ia
+            ORDER BY total DESC, calibre_dominante_ia ASC
+            LIMIT 1
+        """
+        sql_dom_real = f"""
+            SELECT calibre_dominante_real, COUNT(*) AS total
+            FROM comparaciones_calibres
+            {where_sql}
+            GROUP BY calibre_dominante_real
+            ORDER BY total DESC, calibre_dominante_real ASC
+            LIMIT 1
+        """
+        try:
+            with self._connect_readonly() as conn:
+                base = conn.execute(sql_base, params).fetchone()
+                dom_ia = conn.execute(sql_dom_ia, params).fetchone()
+                dom_real = conn.execute(sql_dom_real, params).fetchone()
+        except sqlite3.OperationalError as exc:
+            self._parse_tabla_no_existe(exc)
+
+        return {
+            "numero_registros": int(base["total_registros"] or 0),
+            "error_medio_global": float(base["error_medio_global"] or 0.0),
+            "error_total_medio": float(base["error_total_medio"] or 0.0),
+            "dominante_ia_mas_frecuente": str((dom_ia["calibre_dominante_ia"] if dom_ia else "") or "-"),
+            "dominante_real_mas_frecuente": str((dom_real["calibre_dominante_real"] if dom_real else "") or "-"),
+        }
+
 
 class CalibresDataService:
     """Consultas a Firestore + servidor de fotos reutilizando el patrón actual."""
@@ -548,6 +693,273 @@ class CalibresDataService:
         return firestore_url, "firestore", None
 
 
+class CalibresIAHistoryWindow(tk.Toplevel):
+    """Ventana de consulta histórica IA vs calibrador."""
+
+    def __init__(self, parent: tk.Widget, history_repo: CalibresIAHistoryRepository) -> None:
+        super().__init__(parent)
+        self.title("Histórico IA de calibres")
+        self.geometry("1280x700")
+        self.minsize(1100, 560)
+        self.transient(parent.winfo_toplevel())
+        self.history_repo = history_repo
+        self._current_rows: dict[str, int] = {}
+
+        self.boleta_var = tk.StringVar()
+        self.albaran_var = tk.StringVar()
+        self.variedad_var = tk.StringVar()
+        self.cultivo_var = tk.StringVar()
+        self.estado_var = tk.StringVar(value=f"Origen DB: {self.history_repo.db_path}")
+        self.resumen_var = tk.StringVar(
+            value=(
+                "Registros=0 | Error medio global=0.00 | Error total medio=0.00 | "
+                "Dominante IA frecuente=- | Dominante real frecuente=-"
+            )
+        )
+
+        self._build_ui()
+        self._buscar_historico()
+
+    def _build_ui(self) -> None:
+        container = ttk.Frame(self, padding=10)
+        container.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        container.rowconfigure(3, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        filtros = ttk.LabelFrame(container, text="Filtros", padding=8)
+        filtros.grid(row=0, column=0, sticky="ew")
+        for col in range(8):
+            filtros.columnconfigure(col, weight=1 if col in {1, 3, 5, 7} else 0)
+
+        ttk.Label(filtros, text="Boleta:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Entry(filtros, textvariable=self.boleta_var).grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=2)
+        ttk.Label(filtros, text="Albarán:").grid(row=0, column=2, sticky="w", padx=(0, 6), pady=2)
+        ttk.Entry(filtros, textvariable=self.albaran_var).grid(row=0, column=3, sticky="ew", padx=(0, 10), pady=2)
+        ttk.Label(filtros, text="Variedad:").grid(row=0, column=4, sticky="w", padx=(0, 6), pady=2)
+        ttk.Entry(filtros, textvariable=self.variedad_var).grid(row=0, column=5, sticky="ew", padx=(0, 10), pady=2)
+        ttk.Label(filtros, text="Cultivo:").grid(row=0, column=6, sticky="w", padx=(0, 6), pady=2)
+        ttk.Entry(filtros, textvariable=self.cultivo_var).grid(row=0, column=7, sticky="ew", padx=(0, 10), pady=2)
+        ttk.Button(filtros, text="Buscar histórico", command=self._buscar_historico).grid(
+            row=1, column=7, sticky="e", pady=(8, 0)
+        )
+
+        ttk.Label(container, textvariable=self.estado_var, foreground="#34495e").grid(row=1, column=0, sticky="ew", pady=(8, 3))
+        ttk.Label(container, textvariable=self.resumen_var, foreground="#1f618d", wraplength=1180).grid(
+            row=2, column=0, sticky="ew", pady=(0, 6)
+        )
+
+        frame_tabla = ttk.LabelFrame(container, text="Comparaciones históricas", padding=6)
+        frame_tabla.grid(row=3, column=0, sticky="nsew")
+        frame_tabla.rowconfigure(0, weight=1)
+        frame_tabla.columnconfigure(0, weight=1)
+
+        columns = (
+            "fecha_registro",
+            "boleta",
+            "albaran",
+            "variedad",
+            "id_foto",
+            "modelo_ia",
+            "confianza_ia",
+            "calibre_dominante_ia",
+            "calibre_dominante_real",
+            "error_absoluto_medio",
+            "error_total_absoluto",
+        )
+        self.tree_historial = ttk.Treeview(frame_tabla, columns=columns, show="headings")
+        headers = {
+            "fecha_registro": "Fecha registro",
+            "boleta": "Boleta",
+            "albaran": "Albarán",
+            "variedad": "Variedad",
+            "id_foto": "Id foto",
+            "modelo_ia": "Modelo IA",
+            "confianza_ia": "Confianza",
+            "calibre_dominante_ia": "Dominante IA",
+            "calibre_dominante_real": "Dominante real",
+            "error_absoluto_medio": "Error abs. medio",
+            "error_total_absoluto": "Error total abs.",
+        }
+        widths = {
+            "fecha_registro": 160,
+            "boleta": 90,
+            "albaran": 110,
+            "variedad": 120,
+            "id_foto": 190,
+            "modelo_ia": 150,
+            "confianza_ia": 85,
+            "calibre_dominante_ia": 120,
+            "calibre_dominante_real": 120,
+            "error_absoluto_medio": 120,
+            "error_total_absoluto": 120,
+        }
+        for col in columns:
+            self.tree_historial.heading(col, text=headers[col])
+            self.tree_historial.column(col, width=widths[col], anchor="w")
+        self.tree_historial.grid(row=0, column=0, sticky="nsew")
+        self.tree_historial.bind("<Double-1>", self._on_double_click_historial)
+
+        scroll_y = ttk.Scrollbar(frame_tabla, orient="vertical", command=self.tree_historial.yview)
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x = ttk.Scrollbar(frame_tabla, orient="horizontal", command=self.tree_historial.xview)
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.tree_historial.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+    def _buscar_historico(self) -> None:
+        self.estado_var.set("Consultando histórico IA...")
+        for item in self.tree_historial.get_children():
+            self.tree_historial.delete(item)
+        self._current_rows.clear()
+
+        filtros = {
+            "boleta": self.boleta_var.get().strip(),
+            "albaran": self.albaran_var.get().strip(),
+            "variedad": self.variedad_var.get().strip(),
+            "cultivo": self.cultivo_var.get().strip(),
+        }
+
+        def worker() -> None:
+            try:
+                rows = self.history_repo.list_comparisons(**filtros)
+                summary = self.history_repo.get_summary(**filtros)
+                self.after(0, lambda: self._on_busqueda_ok(rows, summary))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda error=exc: self._on_busqueda_error(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_busqueda_ok(self, rows: list[dict[str, Any]], summary: dict[str, Any]) -> None:
+        if not rows:
+            self.estado_var.set("Sin registros para los filtros aplicados.")
+        else:
+            self.estado_var.set(f"Consulta OK. Registros cargados: {len(rows)}.")
+        for row in rows:
+            item_id = f"hist_{row.get('id')}"
+            self._current_rows[item_id] = int(row.get("id") or 0)
+            self.tree_historial.insert(
+                "",
+                "end",
+                iid=item_id,
+                values=(
+                    row.get("fecha_registro", "-"),
+                    row.get("boleta", "-"),
+                    row.get("albaran", "-"),
+                    row.get("variedad", "-"),
+                    row.get("id_foto", "-"),
+                    row.get("modelo_ia", "-"),
+                    self._fmt_number(row.get("confianza_ia")),
+                    row.get("calibre_dominante_ia", "-"),
+                    row.get("calibre_dominante_real", "-"),
+                    self._fmt_number(row.get("error_absoluto_medio")),
+                    self._fmt_number(row.get("error_total_absoluto")),
+                ),
+            )
+        self.resumen_var.set(
+            "Registros={numero_registros} | Error medio global={error_medio_global} | "
+            "Error total medio={error_total_medio} | Dominante IA frecuente={dominante_ia_mas_frecuente} | "
+            "Dominante real frecuente={dominante_real_mas_frecuente}".format(
+                numero_registros=summary.get("numero_registros", 0),
+                error_medio_global=self._fmt_number(summary.get("error_medio_global")),
+                error_total_medio=self._fmt_number(summary.get("error_total_medio")),
+                dominante_ia_mas_frecuente=summary.get("dominante_ia_mas_frecuente", "-"),
+                dominante_real_mas_frecuente=summary.get("dominante_real_mas_frecuente", "-"),
+            )
+        )
+
+    def _on_busqueda_error(self, exc: Exception) -> None:
+        self.estado_var.set(f"Error consultando histórico IA: {exc}")
+        self.resumen_var.set(
+            "Registros=0 | Error medio global=- | Error total medio=- | Dominante IA frecuente=- | Dominante real frecuente=-"
+        )
+        messagebox.showerror("Histórico IA", f"No se pudo consultar la base histórica:\n{exc}", parent=self)
+
+    @staticmethod
+    def _fmt_number(value: Any) -> str:
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return "-"
+
+    def _on_double_click_historial(self, _event: tk.Event) -> None:
+        selected = self.tree_historial.selection()
+        if not selected:
+            return
+        comparison_id = self._current_rows.get(selected[0], 0)
+        if comparison_id <= 0:
+            return
+
+        def worker() -> None:
+            try:
+                detail = self.history_repo.get_comparison_detail(comparison_id)
+                if not detail:
+                    raise LookupError(f"No se encontró detalle para id={comparison_id}.")
+                self.after(0, lambda: self._open_detail_window(detail))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda error=exc: messagebox.showerror("Histórico IA", str(error), parent=self))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_detail_window(self, detail: dict[str, Any]) -> None:
+        win = tk.Toplevel(self)
+        win.title(f"Detalle histórico IA | id={detail.get('id')}")
+        win.geometry("980x680")
+        win.minsize(840, 520)
+
+        frame = ttk.Frame(win, padding=10)
+        frame.grid(row=0, column=0, sticky="nsew")
+        win.rowconfigure(0, weight=1)
+        win.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        meta = (
+            f"Fecha={detail.get('fecha_registro', '-')} | Boleta={detail.get('boleta', '-')} | "
+            f"Albarán={detail.get('albaran', '-')} | Variedad={detail.get('variedad', '-')} | Foto={detail.get('id_foto', '-')}"
+        )
+        ttk.Label(frame, text=meta, foreground="#34495e", wraplength=940).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        text = tk.Text(frame, wrap="none")
+        text.grid(row=1, column=0, sticky="nsew")
+        scroll_y = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        scroll_y.grid(row=1, column=1, sticky="ns")
+        scroll_x = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
+        scroll_x.grid(row=2, column=0, sticky="ew")
+        text.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+        lineas = ["=== IA CAL0..CAL9 ==="]
+        for idx in range(10):
+            lineas.append(f"IA CAL{idx}: {self._fmt_number(detail.get(f'ia_cal{idx}'))}%")
+        lineas.append("")
+        lineas.append("=== Real normalizado CAL0..CAL9 ===")
+        for idx in range(10):
+            lineas.append(f"Real norm CAL{idx}: {self._fmt_number(detail.get(f'real_norm_cal{idx}'))}%")
+        lineas.append("")
+        lineas.append("=== Real bruto CAL0..CAL9 ===")
+        for idx in range(10):
+            lineas.append(f"Real bruto CAL{idx}: {self._fmt_number(detail.get(f'real_bruto_cal{idx}'))}%")
+        lineas.extend(
+            [
+                "",
+                f"podrido: {self._fmt_number(detail.get('podrido'))}",
+                f"deslinea: {self._fmt_number(detail.get('deslinea'))}",
+                f"desmesa: {self._fmt_number(detail.get('desmesa'))}",
+                f"destrio_total: {self._fmt_number(detail.get('destrio_total'))}",
+                "",
+                f"advertencias_ia: {detail.get('advertencias_ia', '-')}",
+                "",
+                "=== resumen_ia ===",
+                str(detail.get("resumen_ia", "")),
+                "",
+                "=== output_ia_json ===",
+                str(detail.get("output_ia_json", "")),
+            ]
+        )
+        text.insert("1.0", "\n".join(lineas))
+        text.configure(state="disabled")
+
+
 class ObtencionCalibresWindow(BaseToolWindow):
     """UI para flujo boleta -> muestras -> fotos de pantalla de calibres."""
 
@@ -595,6 +1007,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._boleta_entregas_calibrador: str = ""
         self._selector_entrega_map: dict[str, dict[str, Any] | None] = {}
         self.selector_entrega_var = tk.StringVar(value=OPCION_BOLETA_COMPLETA)
+        self._history_window: CalibresIAHistoryWindow | None = None
 
         self._build_ui()
         self._cargar_configuracion()
@@ -715,7 +1128,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         tab_validacion_ia.columnconfigure(0, weight=1)
         toolbar_ia = ttk.Frame(tab_validacion_ia)
         toolbar_ia.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        toolbar_ia.columnconfigure(6, weight=1)
+        toolbar_ia.columnconfigure(7, weight=1)
         self.btn_validacion_ia = ttk.Button(toolbar_ia, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
         self.btn_validacion_ia.grid(row=0, column=0, padx=(0, 6))
         self.btn_validar_lote_ia = ttk.Button(toolbar_ia, text="🤖 Validar lote IA", command=self._validar_lote_ia)
@@ -746,6 +1159,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
             command=self._guardar_comparacion_historico,
         )
         self.btn_guardar_historico.grid(row=0, column=6, padx=(0, 6))
+        self.btn_ver_historico_ia = ttk.Button(
+            toolbar_ia,
+            text="📚 Ver histórico IA",
+            command=self._abrir_panel_historico_ia,
+        )
+        self.btn_ver_historico_ia.grid(row=0, column=7, padx=(0, 6))
 
         ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
         ia_frame.grid(row=1, column=0, sticky="nsew")
@@ -2416,6 +2835,20 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _abrir_panel_historico_ia(self) -> None:
+        try:
+            if self._history_window and self._history_window.winfo_exists():
+                self._history_window.focus_set()
+                self._history_window.lift()
+                return
+            self._history_window = CalibresIAHistoryWindow(self, self.history_repo)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "Obtención calibres",
+                f"No se pudo abrir el panel histórico IA:\n{exc}",
+                parent=self,
+            )
+
     def _on_guardar_historico_ok(self, saved_rows: int, skipped_rows: int) -> None:
         self._set_controles_lote_ia_habilitados(True)
         ruta = self.history_repo.db_path
@@ -2496,6 +2929,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_ver_detalle_estimacion_ia,
             self.btn_comparar_calibrador,
             self.btn_guardar_historico,
+            self.btn_ver_historico_ia,
             self.btn_preparar_analisis,
             self.btn_ejecutar_flujo,
         ):
