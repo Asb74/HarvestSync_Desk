@@ -72,6 +72,30 @@ class OpenAIGateway:
                 "}\n"
                 f"Tarea={task}. Contexto={context or 'sin contexto'}"
             )
+        if task == "estimacion_calibres":
+            return (
+                "Eres un asistente experto en estimación visual agrícola para naranjas en box.\n"
+                "Objetivo: estimar una distribución APROXIMADA de calibres por foto, no una medición exacta fruto a fruto.\n"
+                "Debes considerar explícitamente la oclusión, agrupación y perspectiva.\n"
+                "No inventes precisión exacta ni afirmes certeza cuando no la hay.\n"
+                "Usa los rangos de calibres provistos en el contexto como base de clasificación.\n"
+                "Si la foto no permite una estimación razonable, devuelve apta_para_estimacion=false.\n"
+                "Devuelve ÚNICAMENTE JSON válido, sin markdown ni texto extra, con este esquema exacto:\n"
+                "{"
+                "\"apta_para_estimacion\": true/false, "
+                "\"confianza\": 0-100, "
+                "\"frutos_visibles_estimados\": 0, "
+                "\"calibre_dominante\": \"texto_o_null\", "
+                "\"distribucion\": [{\"calibre\": \"texto\", \"porcentaje\": 0-100}], "
+                "\"advertencias\": [\"...\"], "
+                "\"resumen\": \"texto breve\""
+                "}\n"
+                "Reglas adicionales:\n"
+                "- La suma de porcentajes en distribucion debe ser aproximadamente 100.\n"
+                "- No inventes calibres fuera de los rangos enviados.\n"
+                "- Si apta_para_estimacion=false, devuelve distribucion vacía o muy limitada y explica en advertencias.\n"
+                f"Tarea={task}. Contexto={context or 'sin contexto'}"
+            )
 
         base_prompt = (
             "Eres un asistente para control de calidad agrícola. "
