@@ -1367,7 +1367,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
     @staticmethod
     def _parse_estimacion_ia_result(result: dict[str, Any]) -> dict[str, Any]:
-        parsed_output = ObtencionCalibresWindow._parse_output_json(result.get("output_text", ""))
+        output_text = result.get("output_text", "")
+        parsed_output = ObtencionCalibresWindow._parse_output_json(output_text)
+        if not parsed_output and isinstance(result.get("json_parseado"), dict):
+            parsed_output = result.get("json_parseado", {})
+        if not parsed_output and isinstance(result.get("output"), dict):
+            parsed_output = result.get("output", {})
         advertencias = parsed_output.get("advertencias", [])
         if isinstance(advertencias, str):
             advertencias = [advertencias]
@@ -1397,17 +1402,57 @@ class ObtencionCalibresWindow(BaseToolWindow):
         else:
             apta_texto = "-"
 
+        confianza = parsed_output.get("confianza", "-")
+        frutos_estimados = parsed_output.get("frutos_visibles_estimados", "-")
+        calibre_dominante = parsed_output.get("calibre_dominante", "-")
+        resumen = parsed_output.get("resumen", "-")
+
+        campos_esperados = (
+            "apta_para_estimacion",
+            "confianza",
+            "frutos_visibles_estimados",
+            "calibre_dominante",
+            "distribucion",
+            "advertencias",
+            "resumen",
+        )
+        campos_presentes = [campo for campo in campos_esperados if campo in parsed_output]
+        faltantes = [campo for campo in campos_esperados if campo not in parsed_output]
+        datos_utiles = bool(
+            isinstance(parsed_output, dict)
+            and parsed_output
+            and apta_texto in ("Sí", "No")
+            and (
+                ObtencionCalibresWindow._confianza_a_float(confianza) is not None
+                or ObtencionCalibresWindow._confianza_a_float(frutos_estimados) is not None
+                or str(calibre_dominante).strip() not in ("", "-", "null", "none")
+                or bool(distribucion)
+            )
+        )
+        diagnostico = ""
+        if not parsed_output:
+            diagnostico = "Respuesta IA vacía o JSON inválido."
+        elif not campos_presentes:
+            diagnostico = "Respuesta IA sin campos esperados."
+        elif not datos_utiles:
+            diagnostico = "Respuesta IA sin datos útiles para estimación."
+        elif faltantes:
+            diagnostico = "Respuesta IA parcial: faltan campos esperados."
+
         return {
             "apta_para_estimacion": apta_texto,
-            "confianza": parsed_output.get("confianza", "-"),
-            "frutos_visibles_estimados": parsed_output.get("frutos_visibles_estimados", "-"),
-            "calibre_dominante": parsed_output.get("calibre_dominante", "-"),
+            "confianza": confianza,
+            "frutos_visibles_estimados": frutos_estimados,
+            "calibre_dominante": calibre_dominante,
             "distribucion": distribucion,
             "advertencias": advertencias,
-            "resumen": parsed_output.get("resumen", "-"),
+            "resumen": resumen,
             "json_parse_ok": bool(parsed_output),
             "json_parseado": parsed_output,
-            "output_text_original": result.get("output_text", ""),
+            "output_text_original": output_text,
+            "datos_utiles": datos_utiles,
+            "campos_faltantes": faltantes,
+            "diagnostico": diagnostico,
         }
 
     def _get_ia_resultados_muestra_actual(self) -> dict[str, dict[str, Any]]:
@@ -1543,7 +1588,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             if row.get("error"):
                 estado = row.get("estado", "Error")
             else:
-                estado = "OK"
+                estado = row.get("estado", "OK")
                 if row.get("apta_para_estimacion") == "Sí":
                     aptas += 1
                     for item in row.get("distribucion", []):
@@ -1556,6 +1601,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     texto = str(advertencia).strip()
                     if texto:
                         advertencias.append(texto)
+                diagnostico = str(row.get("diagnostico", "")).strip()
+                if diagnostico:
+                    advertencias.append(diagnostico)
 
             conf = self._confianza_a_float(row.get("confianza"))
             if conf is not None:
@@ -1701,8 +1749,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     )
                     parsed = self._parse_estimacion_ia_result(result)
                     row.update(parsed)
-                    row["estado"] = "OK"
-                    row["error"] = False
+                    row["error"] = not bool(parsed.get("datos_utiles"))
+                    if row["error"]:
+                        row["estado"] = parsed.get("diagnostico") or "Respuesta IA sin campos esperados"
+                    else:
+                        row["estado"] = "OK"
                     row["raw_result"] = result
                 except Exception as exc:  # noqa: BLE001
                     row["estado"] = str(exc)
@@ -1921,7 +1972,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     self.after(0, lambda: self._set_estado_paso_flujo(4, total_steps, "Análisis de frutos ya disponible, se omite."))
 
                 self.after(0, lambda: self._set_estado_paso_flujo(5, total_steps, "Preparando análisis final..."))
-                self.after(0, self._pintar_resultados_deteccion)
+                self.after(0, lambda resultados=self._deteccion_resultados: self._pintar_resultados_deteccion(resultados))
                 self.after(0, self._pintar_resultados_frutos)
                 self.after(0, self._render_cards, self._current_cards)
                 self.after(0, self._finalizar_flujo_recomendado)
