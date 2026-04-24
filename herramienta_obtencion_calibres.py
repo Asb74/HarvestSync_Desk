@@ -179,6 +179,116 @@ def calcular_sesgo_por_calibre(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"filas": filas, "resumen": resumen, "texto_resumen": texto_resumen}
 
 
+def calcular_puntuacion_version(row_version: dict[str, Any]) -> float:
+    """Calcula puntuación operativa de una versión de prompt IA."""
+    error_medio = float(row_version.get("error_medio_global") or 0.0)
+    error_total_medio = float(row_version.get("error_total_medio") or 0.0)
+    total_buena = int(row_version.get("total_buena") or 0)
+    total_aceptable = int(row_version.get("total_aceptable") or 0)
+    total_mala = int(row_version.get("total_mala") or 0)
+    total_muy_mala = int(row_version.get("total_muy_mala") or 0)
+    registros = int(row_version.get("numero_registros") or 0)
+    dominante_ia = str(row_version.get("dominante_ia_mas_frecuente", "-") or "-").strip()
+    dominante_real = str(row_version.get("dominante_real_mas_frecuente", "-") or "-").strip()
+
+    puntuacion = 100.0
+    puntuacion -= error_medio * 5.0
+    puntuacion -= error_total_medio * 0.2
+    puntuacion += total_buena * 3.0
+    puntuacion += total_aceptable * 1.0
+    puntuacion -= total_mala * 5.0
+    puntuacion -= total_muy_mala * 10.0
+    if dominante_ia and dominante_real and dominante_ia == dominante_real:
+        puntuacion += 10.0
+    if registros < 3:
+        puntuacion -= 20.0
+    return puntuacion
+
+
+def generar_recomendacion_versiones(summary_by_version: list[dict[str, Any]]) -> dict[str, str]:
+    """Genera resumen de decisión para comparativa por versión."""
+    versiones_con_datos = [row for row in summary_by_version if int(row.get("numero_registros") or 0) > 0]
+    if not versiones_con_datos:
+        return {
+            "mensaje": "No hay suficientes versiones para comparar.",
+            "copiable": "No hay suficientes versiones para comparar.",
+        }
+
+    mejor_error_medio = min(versiones_con_datos, key=lambda row: float(row.get("error_medio_global") or 0.0))
+    mejor_error_total = min(versiones_con_datos, key=lambda row: float(row.get("error_total_medio") or 0.0))
+    mejor_calidad = max(
+        versiones_con_datos,
+        key=lambda row: (
+            int(row.get("total_buena") or 0),
+            -int(row.get("total_muy_mala") or 0),
+            -int(row.get("total_mala") or 0),
+            int(row.get("total_aceptable") or 0),
+        ),
+    )
+
+    filas_puntuadas = [
+        {
+            **row,
+            "puntuacion": calcular_puntuacion_version(row),
+        }
+        for row in versiones_con_datos
+    ]
+    filas_puntuadas.sort(key=lambda row: float(row.get("puntuacion") or 0.0), reverse=True)
+    recomendada = filas_puntuadas[0]
+
+    if len(filas_puntuadas) == 1:
+        version = str(recomendada.get("prompt_version", "sin_version") or "sin_version")
+        mensaje_unico = (
+            "Solo hay una versión con datos. No se puede comparar, pero se muestra como versión actual.\n"
+            f"Versión actual: {version}."
+        )
+        return {"mensaje": mensaje_unico, "copiable": mensaje_unico}
+
+    diferencia_top2 = float(filas_puntuadas[0].get("puntuacion") or 0.0) - float(filas_puntuadas[1].get("puntuacion") or 0.0)
+    no_concluyente = diferencia_top2 < 5.0
+
+    motivos: list[str] = []
+    if recomendada["prompt_version"] == mejor_error_medio["prompt_version"]:
+        motivos.append("menor error medio")
+    if recomendada["prompt_version"] == mejor_error_total["prompt_version"]:
+        motivos.append("menor error total medio")
+    if (
+        str(recomendada.get("dominante_ia_mas_frecuente", "-"))
+        == str(recomendada.get("dominante_real_mas_frecuente", "-"))
+    ):
+        motivos.append("dominante IA coincide con real")
+    if int(recomendada.get("total_mala") or 0) == 0 and int(recomendada.get("total_muy_mala") or 0) == 0:
+        motivos.append("sin registros MALA ni MUY_MALA")
+    if recomendada["prompt_version"] == mejor_calidad["prompt_version"]:
+        motivos.append("mejor balance de calidad")
+
+    advertencias: list[str] = []
+    for row in versiones_con_datos:
+        if int(row.get("numero_registros") or 0) < 3:
+            advertencias.append(f"Advertencia: versión con muestra insuficiente ({row.get('prompt_version', 'sin_version')}).")
+
+    version_error_medio = str(mejor_error_medio.get("prompt_version", "sin_version") or "sin_version")
+    version_error_total = str(mejor_error_total.get("prompt_version", "sin_version") or "sin_version")
+    version_calidad = str(mejor_calidad.get("prompt_version", "sin_version") or "sin_version")
+    version_recomendada = str(recomendada.get("prompt_version", "sin_version") or "sin_version")
+    motivo_texto = ", ".join(motivos) if motivos else "mayor puntuación compuesta"
+
+    lineas = [
+        f"Mejor por error medio: {version_error_medio}",
+        f"Mejor por error total medio: {version_error_total}",
+        f"Mejor por calidad: {version_calidad}",
+    ]
+    if no_concluyente:
+        lineas.append("Versión recomendada: Recomendación no concluyente.")
+        lineas.append("Motivo: diferencias pequeñas entre versiones.")
+    else:
+        lineas.append(f"Versión recomendada: {version_recomendada}")
+        lineas.append(f"Motivo: {motivo_texto}.")
+    lineas.extend(advertencias)
+    texto = "\n".join(lineas)
+    return {"mensaje": texto, "copiable": texto}
+
+
 def _valor_a_float(value: Any, default: float = 0.0) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -825,13 +935,19 @@ class CalibresIAHistoryRepository:
 
     def get_summary_by_version(self, **filtros: Any) -> list[dict[str, Any]]:
         base = dict(filtros)
+        prompt_version_filtro = str(base.get("prompt_version", "") or "").strip()
         base["prompt_version"] = ""
-        versiones = self.list_prompt_versions()
+        if prompt_version_filtro and prompt_version_filtro.upper() != "TODAS":
+            versiones = [prompt_version_filtro]
+        else:
+            versiones = self.list_prompt_versions()
         resumenes: list[dict[str, Any]] = []
         for version in versiones:
             query = dict(base)
             query["prompt_version"] = version
             resumen = self.get_summary(**query)
+            if int(resumen.get("numero_registros") or 0) <= 0:
+                continue
             resumen["prompt_version"] = version
             resumenes.append(resumen)
         return resumenes
@@ -960,6 +1076,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             value="Sesgo IA por calibre: sin datos (aplique filtros y ejecute búsqueda)."
         )
         self.resumen_version_var = tk.StringVar(value="Comparativa por versión: sin datos.")
+        self._ultimo_texto_recomendacion_version = "Comparativa por versión: sin datos."
 
         self._build_ui()
         self._buscar_historico()
@@ -1111,7 +1228,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         version_cols = (
             "prompt_version", "numero_registros", "error_medio_global", "error_total_medio",
             "dominante_ia_mas_frecuente", "dominante_real_mas_frecuente",
-            "total_buena", "total_aceptable", "total_mala", "total_muy_mala",
+            "total_buena", "total_aceptable", "total_mala", "total_muy_mala", "puntuacion",
         )
         self.tree_version = ttk.Treeview(frame_version, columns=version_cols, show="headings", height=5)
         labels = {
@@ -1125,13 +1242,17 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "total_aceptable": "ACEPTABLE",
             "total_mala": "MALA",
             "total_muy_mala": "MUY_MALA",
+            "puntuacion": "Puntuación",
         }
         for col in version_cols:
             self.tree_version.heading(col, text=labels[col])
             self.tree_version.column(col, width=120, anchor="w")
         self.tree_version.grid(row=0, column=0, sticky="ew")
         ttk.Label(frame_version, textvariable=self.resumen_version_var, foreground="#1f618d", wraplength=1180).grid(
-            row=1, column=0, sticky="ew", pady=(6, 0)
+            row=1, column=0, sticky="ew", pady=(6, 4)
+        )
+        ttk.Button(frame_version, text="Copiar recomendación", command=self._copiar_recomendacion_version).grid(
+            row=2, column=0, sticky="e"
         )
 
     def _buscar_historico(self) -> None:
@@ -1236,26 +1357,35 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         for item in self.tree_version.get_children():
             self.tree_version.delete(item)
         if not summary_by_version:
-            self.resumen_version_var.set("Comparativa por versión: sin datos.")
+            mensaje = "Comparativa por versión: sin datos."
+            self.resumen_version_var.set(mensaje)
+            self._ultimo_texto_recomendacion_version = mensaje
             return
+        filas_puntuadas = []
         for item in summary_by_version:
+            puntuacion = calcular_puntuacion_version(item)
+            item_con_puntuacion = {**item, "puntuacion": puntuacion}
+            filas_puntuadas.append(item_con_puntuacion)
             self.tree_version.insert(
                 "",
                 "end",
                 values=(
-                    item.get("prompt_version", "sin_version"),
-                    item.get("numero_registros", 0),
-                    self._fmt_number(item.get("error_medio_global")),
-                    self._fmt_number(item.get("error_total_medio")),
-                    item.get("dominante_ia_mas_frecuente", "-"),
-                    item.get("dominante_real_mas_frecuente", "-"),
-                    item.get("total_buena", 0),
-                    item.get("total_aceptable", 0),
-                    item.get("total_mala", 0),
-                    item.get("total_muy_mala", 0),
+                    item_con_puntuacion.get("prompt_version", "sin_version"),
+                    item_con_puntuacion.get("numero_registros", 0),
+                    self._fmt_number(item_con_puntuacion.get("error_medio_global")),
+                    self._fmt_number(item_con_puntuacion.get("error_total_medio")),
+                    item_con_puntuacion.get("dominante_ia_mas_frecuente", "-"),
+                    item_con_puntuacion.get("dominante_real_mas_frecuente", "-"),
+                    item_con_puntuacion.get("total_buena", 0),
+                    item_con_puntuacion.get("total_aceptable", 0),
+                    item_con_puntuacion.get("total_mala", 0),
+                    item_con_puntuacion.get("total_muy_mala", 0),
+                    self._fmt_number(item_con_puntuacion.get("puntuacion")),
                 ),
             )
-        self.resumen_version_var.set(f"Versiones con datos: {len(summary_by_version)}.")
+        recomendacion = generar_recomendacion_versiones(filas_puntuadas)
+        self.resumen_version_var.set(recomendacion.get("mensaje", "Comparativa por versión: sin datos."))
+        self._ultimo_texto_recomendacion_version = recomendacion.get("copiable", "Comparativa por versión: sin datos.")
 
     def _render_sesgo(self, analisis: dict[str, Any]) -> None:
         for item in self.tree_sesgo.get_children():
@@ -1299,6 +1429,15 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             self.estado_var.set("Resumen de sesgo copiado al portapapeles.")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Histórico IA", f"No se pudo copiar el resumen de sesgo:\n{exc}", parent=self)
+
+    def _copiar_recomendacion_version(self) -> None:
+        texto = self._ultimo_texto_recomendacion_version.strip() or "Comparativa por versión: sin datos."
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(texto)
+            self.estado_var.set("Recomendación por versión copiada al portapapeles.")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Histórico IA", f"No se pudo copiar la recomendación:\n{exc}", parent=self)
 
     @staticmethod
     def _fmt_number(value: Any) -> str:
