@@ -43,6 +43,36 @@ class OpenAIGateway:
 
     @staticmethod
     def _build_prompt(task: str, context: str) -> str:
+        if task == "validacion_foto":
+            return (
+                "Eres un asistente experto en control de calidad agrícola para naranjas.\n"
+                "Recibirás una foto de un box con frutas agrupadas.\n"
+                "Objetivo: decidir si la imagen sirve para análisis muestral de calibres "
+                "(estimación operativa), NO si es una foto perfecta.\n"
+                "Criterio de aptitud:\n"
+                "- NO marcar apta=false solo por oclusión media.\n"
+                "- Marcar apta=false únicamente cuando la imagen no permite un análisis razonable, por ejemplo:\n"
+                "  1) no se ve el patrón,\n"
+                "  2) la foto está muy desenfocada,\n"
+                "  3) el box no está suficientemente visible,\n"
+                "  4) oclusión extrema,\n"
+                "  5) muy pocas frutas visibles.\n"
+                "Devuelve ÚNICAMENTE JSON válido, sin markdown ni texto extra, con este esquema exacto:\n"
+                "{"
+                "\"apta\": true/false, "
+                "\"confianza\": 0-100, "
+                "\"oclusion\": \"baja|media|alta\", "
+                "\"patron_visible\": true/false, "
+                "\"box_centrado\": true/false, "
+                "\"frutas_visibles\": \"pocas|suficientes|muchas\", "
+                "\"interferencia_patron\": \"baja|media|alta\", "
+                "\"resumen\": \"texto breve\", "
+                "\"alertas\": [\"...\"], "
+                "\"recomendacion\": \"...\""
+                "}\n"
+                f"Tarea={task}. Contexto={context or 'sin contexto'}"
+            )
+
         base_prompt = (
             "Eres un asistente para control de calidad agrícola. "
             "Devuelve un JSON compacto con campos: summary, alerts, confidence."
