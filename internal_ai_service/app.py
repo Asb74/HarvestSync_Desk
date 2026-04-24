@@ -105,12 +105,20 @@ def health() -> Any:
     """Estado básico del servicio y presencia de clave."""
     cfg = get_config()
     key_file_exists = cfg.openai_key_path.exists()
+    gateway = get_gateway()
+    try:
+        gateway.ensure_prompt_schema()
+        gateway.seed_prompts_if_empty()
+    except Exception as exc:  # pragma: no cover - diagnóstico
+        logger.warning("health: no se pudo inicializar esquema prompts sqlite: %s", exc)
+    prompt_health = gateway.get_prompt_db_health()
     return jsonify(
         {
             "ok": True,
             "service": "harvestsync-internal-ai",
             "key_file_exists": key_file_exists,
             "model": cfg.openai_model,
+            **prompt_health,
         }
     )
 
