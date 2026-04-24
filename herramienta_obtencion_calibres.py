@@ -42,6 +42,10 @@ DOCUMENT_CONFIG = "calibres"
 LOGGER = logging.getLogger(__name__)
 DB_FRUTA_PATH = r"X:\BasesSQLite\DBfruta.sqlite"
 CALIBRES_CALIBRADOR = [f"CAL {idx}" for idx in range(10)]
+FILTRO_CALIBRADOR_CAMPANA = "2026"
+FILTRO_CALIBRADOR_EMPRESA = "1"
+FILTRO_CALIBRADOR_CULTIVO = "CITRICOS"
+OPCION_BOLETA_COMPLETA = "Boleta completa"
 
 
 def normalizar_distribucion_calibres(calibres_brutos: dict[str, float]) -> dict[str, float]:
@@ -84,6 +88,129 @@ def comparar_distribuciones(
         "error_total_abs": sum(errores_abs),
         "calibre_dominante_ia": dominante_ia,
         "calibre_dominante_real": dominante_real,
+    }
+
+
+def _valor_a_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        limpio = value.strip().replace("%", "").replace(",", ".")
+        try:
+            return float(limpio)
+        except ValueError:
+            return default
+    return default
+
+
+def _normalizar_porcentaje(value: Any) -> float:
+    num = _valor_a_float(value, default=0.0)
+    if num < 0:
+        return 0.0
+    # Soporta fracciones 0..1 y porcentaje 0..100.
+    return num * 100.0 if num <= 1.0 else num
+
+
+def listar_entregas_por_boleta(
+    db_path: str,
+    boleta: str,
+    campana: str = FILTRO_CALIBRADOR_CAMPANA,
+    empresa: str = FILTRO_CALIBRADOR_EMPRESA,
+    cultivo: str = FILTRO_CALIBRADOR_CULTIVO,
+) -> list[dict[str, Any]]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    try:
+        sql = """
+        SELECT
+            TRIM(COALESCE(Boleta, '')) AS Boleta,
+            TRIM(COALESCE(CAMPAÑA, '')) AS Campana,
+            TRIM(COALESCE(EMPRESA, '')) AS Empresa,
+            TRIM(COALESCE(CULTIVO, '')) AS Cultivo,
+            TRIM(COALESCE(AlbaranDef, '')) AS AlbaranDef,
+            TRIM(COALESCE(Albaran, '')) AS Albaran,
+            TRIM(COALESCE("Albarán2", '')) AS Albaran2,
+            COALESCE(Neto, 0) AS Neto,
+            COALESCE(Fcarga, '') AS Fcarga,
+            COALESCE("FRecolección", '') AS FRecoleccion,
+            TRIM(COALESCE(Variedad, '')) AS Variedad,
+            TRIM(COALESCE(Socio, '')) AS Socio,
+            TRIM(COALESCE(IdSocio, '')) AS IdSocio,
+            COALESCE("%Podrido", 0) AS Podrido,
+            COALESCE("%DesLinea", 0) AS DesLinea,
+            COALESCE("%DesMesa", 0) AS DesMesa,
+            COALESCE("%Cal0", 0) AS Cal0,
+            COALESCE("%Cal1", 0) AS Cal1,
+            COALESCE("%Cal2", 0) AS Cal2,
+            COALESCE("%Cal3", 0) AS Cal3,
+            COALESCE("%Cal4", 0) AS Cal4,
+            COALESCE("%Cal5", 0) AS Cal5,
+            COALESCE("%Cal6", 0) AS Cal6,
+            COALESCE("%Cal7", 0) AS Cal7,
+            COALESCE("%Cal8", 0) AS Cal8,
+            COALESCE("%Cal9", 0) AS Cal9
+        FROM PesosFres
+        WHERE TRIM(COALESCE(Boleta, '')) = ?
+          AND TRIM(COALESCE(CAMPAÑA, '')) = ?
+          AND TRIM(COALESCE(EMPRESA, '')) = ?
+          AND UPPER(TRIM(COALESCE(CULTIVO, ''))) = ?
+        ORDER BY DATE(COALESCE(Fcarga, '')) ASC, TRIM(COALESCE(AlbaranDef, Albaran, '')) ASC
+        """
+        rows = conn.execute(sql, (boleta, campana, empresa, cultivo.upper())).fetchall()
+    finally:
+        conn.close()
+
+    entregas: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        entrega = {key: row[key] for key in row.keys()}
+        entrega["idx"] = idx
+        entrega["neto"] = _valor_a_float(row["Neto"], 0.0)
+        entregas.append(entrega)
+    return entregas
+
+
+def cargar_calibrador_por_entrega(entrega: dict[str, Any]) -> dict[str, Any]:
+    pod = _normalizar_porcentaje(entrega.get("Podrido"))
+    des_linea = _normalizar_porcentaje(entrega.get("DesLinea"))
+    des_mesa = _normalizar_porcentaje(entrega.get("DesMesa"))
+    calibres_brutos = {f"CAL {idx}": _normalizar_porcentaje(entrega.get(f"Cal{idx}")) for idx in range(10)}
+    return {
+        "podrido": pod,
+        "des_linea": des_linea,
+        "des_mesa": des_mesa,
+        "destrio_total": des_linea + des_mesa,
+        "calibres_brutos": calibres_brutos,
+        "suma_calibres": sum(calibres_brutos.values()),
+    }
+
+
+def cargar_calibrador_boleta_ponderado(entregas: list[dict[str, Any]]) -> dict[str, Any]:
+    if not entregas:
+        raise ValueError("No hay entregas disponibles para calcular boleta completa.")
+    peso_total = sum(max(0.0, _valor_a_float(item.get("neto"), 0.0)) for item in entregas)
+    if peso_total <= 0:
+        raise ValueError("No se puede ponderar boleta completa: suma de Neto <= 0.")
+
+    campos_pct = ["Podrido", "DesLinea", "DesMesa", *[f"Cal{idx}" for idx in range(10)]]
+    ponderados: dict[str, float] = {campo: 0.0 for campo in campos_pct}
+    for item in entregas:
+        neto = max(0.0, _valor_a_float(item.get("neto"), 0.0))
+        for campo in campos_pct:
+            ponderados[campo] += neto * _normalizar_porcentaje(item.get(campo))
+
+    pod = ponderados["Podrido"] / peso_total
+    des_linea = ponderados["DesLinea"] / peso_total
+    des_mesa = ponderados["DesMesa"] / peso_total
+    calibres_brutos = {f"CAL {idx}": ponderados[f"Cal{idx}"] / peso_total for idx in range(10)}
+    return {
+        "podrido": pod,
+        "des_linea": des_linea,
+        "des_mesa": des_mesa,
+        "destrio_total": des_linea + des_mesa,
+        "calibres_brutos": calibres_brutos,
+        "suma_calibres": sum(calibres_brutos.values()),
     }
 
 
@@ -265,6 +392,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._ai_estimacion_en_curso = False
         self._flujo_recomendado_en_curso = False
         self._comparacion_ia_vs_calibrador: dict[str, Any] = {}
+        self._entregas_calibrador: list[dict[str, Any]] = []
+        self._boleta_entregas_calibrador: str = ""
+        self._selector_entrega_map: dict[str, dict[str, Any] | None] = {}
+        self.selector_entrega_var = tk.StringVar(value=OPCION_BOLETA_COMPLETA)
 
         self._build_ui()
         self._cargar_configuracion()
@@ -493,15 +624,35 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         comparacion_frame = ttk.LabelFrame(tab_validacion_ia, text="Comparación IA vs calibrador normalizado", padding=6)
         comparacion_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
-        comparacion_frame.rowconfigure(1, weight=1)
-        comparacion_frame.rowconfigure(3, weight=1)
+        comparacion_frame.rowconfigure(2, weight=1)
+        comparacion_frame.rowconfigure(4, weight=1)
         comparacion_frame.columnconfigure(0, weight=1)
+
+        selector_frame = ttk.Frame(comparacion_frame)
+        selector_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        selector_frame.columnconfigure(1, weight=1)
+        ttk.Button(selector_frame, text="📥 Cargar entregas calibrador", command=self._cargar_entregas_calibrador).grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        self.combo_entrega_calibrador = ttk.Combobox(
+            selector_frame,
+            textvariable=self.selector_entrega_var,
+            state="readonly",
+            values=[OPCION_BOLETA_COMPLETA],
+        )
+        self.combo_entrega_calibrador.grid(row=0, column=1, sticky="ew")
+        self.combo_entrega_calibrador.bind("<<ComboboxSelected>>", lambda _evt: self._actualizar_texto_contexto_comparacion())
+
+        self.contexto_comparacion_var = tk.StringVar(value="Contexto: Boleta completa ponderada.")
+        ttk.Label(selector_frame, textvariable=self.contexto_comparacion_var, foreground="#34495e").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
 
         self.resumen_calibrador_var = tk.StringVar(
             value="Calibrador total partida: Podrido=- | DesLínea=- | DesMesa=- | Destrío total=- | ΣCAL0..CAL9=-"
         )
         ttk.Label(comparacion_frame, textvariable=self.resumen_calibrador_var, foreground="#34495e").grid(
-            row=0, column=0, sticky="w", pady=(0, 6)
+            row=1, column=0, sticky="w", pady=(0, 6)
         )
         self.tree_comparacion_calibres = ttk.Treeview(
             comparacion_frame,
@@ -520,13 +671,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
         for col in headers_comp:
             self.tree_comparacion_calibres.heading(col, text=headers_comp[col])
             self.tree_comparacion_calibres.column(col, width=widths_comp[col], anchor="w")
-        self.tree_comparacion_calibres.grid(row=1, column=0, sticky="nsew")
+        self.tree_comparacion_calibres.grid(row=2, column=0, sticky="nsew")
 
         self.resumen_metricas_comparacion_var = tk.StringVar(
             value="Métricas: error absoluto medio=- | error total absoluto=- | dominante IA=- | dominante real normalizado=-"
         )
         ttk.Label(comparacion_frame, textvariable=self.resumen_metricas_comparacion_var, foreground="#34495e").grid(
-            row=2, column=0, sticky="w", pady=(6, 2)
+            row=3, column=0, sticky="w", pady=(6, 2)
         )
         self.nota_comparacion_var = tk.StringVar(
             value="Comparación realizada sobre distribución de calibres normalizada, excluyendo podrido y destrío."
@@ -537,7 +688,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             foreground="#7d6608",
             wraplength=980,
             justify="left",
-        ).grid(row=3, column=0, sticky="w", pady=(2, 0))
+        ).grid(row=4, column=0, sticky="w", pady=(2, 0))
 
         tab_patron_escala.rowconfigure(1, weight=1)
         tab_patron_escala.columnconfigure(0, weight=1)
@@ -710,6 +861,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._limpiar_resultados_ia()
         self._limpiar_resultados_estimacion_ia()
         self._limpiar_resultados_comparacion_calibres()
+        self._limpiar_selector_entregas()
 
         def worker() -> None:
             try:
@@ -1666,6 +1818,111 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
         self._comparacion_ia_vs_calibrador = {}
 
+    def _limpiar_selector_entregas(self) -> None:
+        self._entregas_calibrador = []
+        self._boleta_entregas_calibrador = ""
+        self._selector_entrega_map = {OPCION_BOLETA_COMPLETA: None}
+        if hasattr(self, "combo_entrega_calibrador"):
+            self.combo_entrega_calibrador.configure(values=[OPCION_BOLETA_COMPLETA])
+        self.selector_entrega_var.set(OPCION_BOLETA_COMPLETA)
+        self._actualizar_texto_contexto_comparacion()
+
+    @staticmethod
+    def _parse_fecha_entrega(entrega: dict[str, Any]) -> str:
+        for campo in ("Fcarga", "FRecoleccion"):
+            value = entrega.get(campo)
+            if value in (None, ""):
+                continue
+            if hasattr(value, "strftime"):
+                return value.strftime("%d/%m/%Y")
+            texto = str(value).strip()
+            if not texto:
+                continue
+            if len(texto) >= 10 and texto[4] == "-" and texto[7] == "-":
+                return f"{texto[8:10]}/{texto[5:7]}/{texto[0:4]}"
+            return texto
+        return "-"
+
+    def _formatear_opcion_entrega(self, entrega: dict[str, Any]) -> str:
+        albaran = str(entrega.get("AlbaranDef") or entrega.get("Albaran") or entrega.get("Albaran2") or "-").strip() or "-"
+        fecha = self._parse_fecha_entrega(entrega)
+        neto = _valor_a_float(entrega.get("neto"), 0.0)
+        variedad = str(entrega.get("Variedad", "") or "-").strip() or "-"
+        return f"{albaran} | Fecha {fecha} | Neto {neto:.3f} | Variedad {variedad}"
+
+    def _actualizar_texto_contexto_comparacion(self) -> None:
+        clave = self.selector_entrega_var.get().strip() or OPCION_BOLETA_COMPLETA
+        if clave == OPCION_BOLETA_COMPLETA:
+            self.contexto_comparacion_var.set("Contexto: Boleta completa ponderada por Neto.")
+            return
+        entrega = self._selector_entrega_map.get(clave)
+        if not entrega:
+            self.contexto_comparacion_var.set("Contexto: entrega no encontrada.")
+            return
+        self.contexto_comparacion_var.set(f"Contexto: Entrega concreta -> {self._formatear_opcion_entrega(entrega)}")
+
+    def _cargar_entregas_calibrador(self) -> None:
+        boleta = self._get_boleta_actual()
+        if not boleta:
+            messagebox.showinfo("Obtención calibres", "Ingrese o cargue una boleta antes de consultar entregas.", parent=self)
+            return
+        self.estado_var.set(f"Cargando entregas de calibrador para boleta {boleta}...")
+
+        def worker() -> None:
+            try:
+                entregas = listar_entregas_por_boleta(DB_FRUTA_PATH, boleta)
+                self.after(0, lambda: self._on_cargar_entregas_calibrador_ok(boleta, entregas))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda error=exc: self._on_cargar_entregas_calibrador_error(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_cargar_entregas_calibrador_ok(self, boleta: str, entregas: list[dict[str, Any]]) -> None:
+        self._entregas_calibrador = entregas
+        self._boleta_entregas_calibrador = boleta
+        self._aplicar_entregas_selector(entregas)
+
+        if not entregas:
+            self.estado_var.set(f"Boleta {boleta}: sin entregas en calibrador con filtros CAMPAÑA/EMPRESA/CULTIVO.")
+            messagebox.showwarning(
+                "Obtención calibres",
+                f"No hay entregas para boleta {boleta} con CAMPAÑA={FILTRO_CALIBRADOR_CAMPANA}, "
+                f"EMPRESA={FILTRO_CALIBRADOR_EMPRESA}, CULTIVO={FILTRO_CALIBRADOR_CULTIVO}.",
+                parent=self,
+            )
+            return
+
+        self.estado_var.set(f"Entregas calibrador cargadas: {len(entregas)} para boleta {boleta}.")
+
+    def _aplicar_entregas_selector(self, entregas: list[dict[str, Any]]) -> None:
+        seleccion_actual = self.selector_entrega_var.get().strip()
+        self._selector_entrega_map = {OPCION_BOLETA_COMPLETA: None}
+        values = [OPCION_BOLETA_COMPLETA]
+        for entrega in entregas:
+            key = f"Entrega {int(entrega.get('idx', 0)) + 1}: {self._formatear_opcion_entrega(entrega)}"
+            self._selector_entrega_map[key] = entrega
+            values.append(key)
+        self.combo_entrega_calibrador.configure(values=values)
+
+        if not entregas:
+            self.selector_entrega_var.set(OPCION_BOLETA_COMPLETA)
+            self._actualizar_texto_contexto_comparacion()
+            return
+        if seleccion_actual and seleccion_actual in self._selector_entrega_map:
+            self.selector_entrega_var.set(seleccion_actual)
+            self._actualizar_texto_contexto_comparacion()
+            return
+
+        if len(entregas) == 1:
+            self.selector_entrega_var.set(values[1])
+        else:
+            self.selector_entrega_var.set(OPCION_BOLETA_COMPLETA)
+        self._actualizar_texto_contexto_comparacion()
+
+    def _on_cargar_entregas_calibrador_error(self, exc: Exception) -> None:
+        self.estado_var.set("Error al cargar entregas de calibrador.")
+        messagebox.showerror("Obtención calibres", f"No se pudieron cargar entregas: {exc}", parent=self)
+
     @staticmethod
     def _confianza_a_float(value: Any) -> float | None:
         if isinstance(value, (int, float)):
@@ -1710,54 +1967,6 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return {}
         return {calibre: (valor * 100.0 / total) for calibre, valor in promedio.items()}
 
-    def _leer_calibrador_boleta(self, boleta: str) -> dict[str, Any]:
-        conn = sqlite3.connect(DB_FRUTA_PATH)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
-        try:
-            sql = """
-            SELECT
-                COALESCE("%Podrido", 0) AS Podrido,
-                COALESCE("%DesLinea", 0) AS DesLinea,
-                COALESCE("%DesMesa", 0) AS DesMesa,
-                COALESCE("%Cal0", 0) AS Cal0,
-                COALESCE("%Cal1", 0) AS Cal1,
-                COALESCE("%Cal2", 0) AS Cal2,
-                COALESCE("%Cal3", 0) AS Cal3,
-                COALESCE("%Cal4", 0) AS Cal4,
-                COALESCE("%Cal5", 0) AS Cal5,
-                COALESCE("%Cal6", 0) AS Cal6,
-                COALESCE("%Cal7", 0) AS Cal7,
-                COALESCE("%Cal8", 0) AS Cal8,
-                COALESCE("%Cal9", 0) AS Cal9
-            FROM PesosFres
-            WHERE TRIM(COALESCE(Boleta, '')) = ?
-            ORDER BY Fcarga DESC
-            LIMIT 1
-            """
-            row = conn.execute(sql, (boleta,)).fetchone()
-        finally:
-            conn.close()
-        if row is None:
-            raise ValueError(f"No existe registro en PesosFres para boleta {boleta}.")
-
-        pod = self._confianza_a_float(row["Podrido"]) or 0.0
-        des_linea = self._confianza_a_float(row["DesLinea"]) or 0.0
-        des_mesa = self._confianza_a_float(row["DesMesa"]) or 0.0
-        calibres_brutos = {
-            f"CAL {idx}": self._confianza_a_float(row[f"Cal{idx}"]) or 0.0
-            for idx in range(10)
-        }
-        return {
-            "podrido": pod,
-            "des_linea": des_linea,
-            "des_mesa": des_mesa,
-            "destrio_total": des_linea + des_mesa,
-            "calibres_brutos": calibres_brutos,
-            "suma_calibres": sum(calibres_brutos.values()),
-        }
-
     def _comparar_ia_vs_calibrador(self) -> None:
         boleta = self._get_boleta_actual()
         if not boleta:
@@ -1772,7 +1981,25 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
             return
         try:
-            calibrador = self._leer_calibrador_boleta(boleta)
+            if self._boleta_entregas_calibrador != boleta:
+                self._entregas_calibrador = listar_entregas_por_boleta(DB_FRUTA_PATH, boleta)
+                self._boleta_entregas_calibrador = boleta
+            if not self._entregas_calibrador:
+                raise ValueError(
+                    f"No hay entregas para boleta {boleta} con filtros CAMPAÑA={FILTRO_CALIBRADOR_CAMPANA}, "
+                    f"EMPRESA={FILTRO_CALIBRADOR_EMPRESA}, CULTIVO={FILTRO_CALIBRADOR_CULTIVO}."
+                )
+            self._aplicar_entregas_selector(self._entregas_calibrador)
+            clave_selector = self.selector_entrega_var.get().strip() or OPCION_BOLETA_COMPLETA
+            if clave_selector == OPCION_BOLETA_COMPLETA:
+                calibrador = cargar_calibrador_boleta_ponderado(self._entregas_calibrador)
+                contexto = "Boleta completa ponderada por Neto"
+            else:
+                entrega = self._selector_entrega_map.get(clave_selector)
+                if not entrega:
+                    raise ValueError("La entrega seleccionada no está disponible. Recargue entregas.")
+                calibrador = cargar_calibrador_por_entrega(entrega)
+                contexto = f"Entrega concreta ({self._formatear_opcion_entrega(entrega)})"
             real_normalizado = normalizar_distribucion_calibres(calibrador["calibres_brutos"])
         except Exception as exc:  # noqa: BLE001
             self._limpiar_resultados_comparacion_calibres()
@@ -1809,7 +2036,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             f"dominante real normalizado={comp['calibre_dominante_real']}"
         )
         self.nota_comparacion_var.set(
-            "Comparación realizada sobre distribución de calibres normalizada, excluyendo podrido y destrío."
+            f"Comparación sobre {contexto}. Distribución real normalizada en CAL0..CAL9; "
+            "podrido/destrío no forman parte de dicha normalización."
         )
 
     def _pintar_resultados_ia(self) -> None:
