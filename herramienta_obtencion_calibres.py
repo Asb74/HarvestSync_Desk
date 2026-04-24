@@ -3059,6 +3059,22 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return
         self.contexto_comparacion_var.set(f"Contexto: Entrega concreta -> {self._formatear_opcion_entrega(entrega)}")
 
+    def _resolver_variedad_ia(self) -> str:
+        clave = self.selector_entrega_var.get().strip() or OPCION_BOLETA_COMPLETA
+        if clave != OPCION_BOLETA_COMPLETA:
+            entrega = self._selector_entrega_map.get(clave) or {}
+            variedad = str(entrega.get("Variedad", "") or "").strip().upper()
+            return variedad or "*"
+        variedades = {
+            str(entrega.get("Variedad", "") or "").strip().upper()
+            for entrega in self._entregas_calibrador
+            if isinstance(entrega, dict)
+        }
+        variedades = {item for item in variedades if item}
+        if len(variedades) == 1:
+            return next(iter(variedades))
+        return "*"
+
     def _cargar_entregas_calibrador(self) -> None:
         boleta = self._get_boleta_actual()
         if not boleta:
@@ -3640,6 +3656,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
         muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
         cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
+        variedad = self._resolver_variedad_ia()
         rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
         diametro_patron = self._config.diametro_patron_mm if self._config else 94.0
         if not rangos:
@@ -3663,6 +3680,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         contexto_base = {
             "tipo_tarea": "estimacion_calibres_experimental",
             "cultivo": cultivo,
+            "variedad": variedad,
             "diametro_patron_mm": diametro_patron,
             "rangos_calibres": rangos,
             "respuesta_esperada": {
@@ -3719,7 +3737,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         task="estimacion_calibres",
                         context=json.dumps(contexto, ensure_ascii=False),
                         cultivo=cultivo,
-                        variedad="",
+                        variedad=variedad,
                         timeout_seconds=30,
                     )
                     parsed = self._parse_estimacion_ia_result(result)
@@ -4279,11 +4297,16 @@ class ObtencionCalibresWindow(BaseToolWindow):
         parseado = row.get("json_parseado")
         parseado_pretty = json.dumps(parseado, ensure_ascii=False, indent=2) if isinstance(parseado, dict) else "-"
         diagnostico = str(row.get("diagnostico", "")).strip() or "-"
+        raw_result = row.get("raw_result", {})
+        prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or "-"
+        prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "-"
 
         encabezado = (
             f"id_foto: {id_foto}\n"
             f"image_url: {image_url}\n"
             f"task: {task_enviada}\n"
+            f"prompt_version: {prompt_version}\n"
+            f"prompt_source: {prompt_source}\n"
             f"estado: {row.get('estado', '-')}\n"
             f"diagnóstico: {diagnostico}"
         )

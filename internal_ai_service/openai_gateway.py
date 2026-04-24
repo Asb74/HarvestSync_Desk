@@ -21,6 +21,7 @@ class OpenAIServiceError(RuntimeError):
 
 class OpenAIGateway:
     PROMPTS_DB_ENV = "HARVESTSYNC_CALIBRES_IA_DB_PATH"
+    PROMPTS_DB_ENV_LEGACY = "CALIBRES_IA_DB_PATH"
     PROMPTS_DB_DEFAULT_PATH = r"\\Personal\C\BasesSQLite\DBcalibres_ia.sqlite"
 
     def __init__(
@@ -36,7 +37,12 @@ class OpenAIGateway:
         self.timeout_seconds = timeout_seconds
         self.base_url = base_url.rstrip("/")
         self.logger = logging.getLogger("harvestsync.internal_ai.gateway")
-        self.prompts_db_path = Path(os.getenv(self.PROMPTS_DB_ENV, self.PROMPTS_DB_DEFAULT_PATH))
+        prompts_db_raw = (
+            os.getenv(self.PROMPTS_DB_ENV, "").strip()
+            or os.getenv(self.PROMPTS_DB_ENV_LEGACY, "").strip()
+            or self.PROMPTS_DB_DEFAULT_PATH
+        )
+        self.prompts_db_path = Path(prompts_db_raw)
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -140,10 +146,10 @@ class OpenAIGateway:
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_prompts_ia_task_cultivo_variedad_version "
                 "ON prompts_ia(task, cultivo, variedad, prompt_version)"
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_task ON prompts_ia(task)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_cultivo ON prompts_ia(cultivo)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_variedad ON prompts_ia(variedad)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ia_activo ON prompts_ia(activo)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_task ON prompts_ia(task)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_cultivo ON prompts_ia(cultivo)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_variedad ON prompts_ia(variedad)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompts_activo ON prompts_ia(activo)")
             conn.commit()
 
     def seed_prompts_if_empty(self) -> None:
@@ -261,7 +267,7 @@ class OpenAIGateway:
     ) -> dict[str, str]:
         cultivo_norm = (cultivo or "*").strip().upper() or "*"
         variedad_norm = (variedad or "*").strip().upper() or "*"
-        task_norm = task.strip()
+        task_norm = task.strip().lower()
 
         self.ensure_prompt_schema()
         self.seed_prompts_if_empty()
@@ -269,8 +275,8 @@ class OpenAIGateway:
             conn.row_factory = sqlite3.Row
             levels = [
                 (cultivo_norm, variedad_norm, "sqlite_exact"),
-                (cultivo_norm, "*", "sqlite_cultivo_default"),
-                ("*", "*", "sqlite_global_default"),
+                (cultivo_norm, "*", "sqlite_cultivo"),
+                ("*", "*", "sqlite_generico"),
             ]
             for cultivo_q, variedad_q, source in levels:
                 row = conn.execute(
@@ -278,7 +284,7 @@ class OpenAIGateway:
                     SELECT texto_prompt, prompt_version
                     FROM prompts_ia
                     WHERE task = ? AND cultivo = ? AND variedad = ? AND activo = 1
-                    ORDER BY COALESCE(fecha_actualizacion, ''), id DESC
+                    ORDER BY id DESC
                     LIMIT 1
                     """,
                     (task_norm, cultivo_q, variedad_q),
@@ -298,6 +304,27 @@ class OpenAIGateway:
             "prompt_source": "fallback_internal",
             "cultivo": cultivo_norm,
             "variedad": variedad_norm,
+        }
+
+    def get_prompt_db_health(self) -> dict[str, Any]:
+        db_exists = self.prompts_db_path.exists()
+        table_exists = False
+        prompts_count = 0
+        try:
+            with sqlite3.connect(str(self.prompts_db_path)) as conn:
+                table_row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompts_ia' LIMIT 1"
+                ).fetchone()
+                table_exists = table_row is not None
+                if table_exists:
+                    prompts_count = int(conn.execute("SELECT COUNT(*) FROM prompts_ia").fetchone()[0] or 0)
+        except Exception as exc:  # pragma: no cover - diagnóstico en health
+            self.logger.warning("No se pudo consultar salud de prompts sqlite: %s", exc)
+        return {
+            "prompt_db_path": str(self.prompts_db_path),
+            "prompt_db_exists": bool(db_exists),
+            "prompts_table_exists": bool(table_exists),
+            "prompts_count": int(prompts_count),
         }
 
     def analyze_image(self, *, image_path: Path, task: str, context: str, cultivo: str = "", variedad: str = "") -> dict[str, Any]:

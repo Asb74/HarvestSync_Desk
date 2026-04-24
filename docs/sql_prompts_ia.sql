@@ -17,10 +17,10 @@ CREATE TABLE IF NOT EXISTS prompts_ia (
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_prompts_ia_task_cultivo_variedad_version
     ON prompts_ia(task, cultivo, variedad, prompt_version);
-CREATE INDEX IF NOT EXISTS idx_prompts_ia_task ON prompts_ia(task);
-CREATE INDEX IF NOT EXISTS idx_prompts_ia_cultivo ON prompts_ia(cultivo);
-CREATE INDEX IF NOT EXISTS idx_prompts_ia_variedad ON prompts_ia(variedad);
-CREATE INDEX IF NOT EXISTS idx_prompts_ia_activo ON prompts_ia(activo);
+CREATE INDEX IF NOT EXISTS idx_prompts_task ON prompts_ia(task);
+CREATE INDEX IF NOT EXISTS idx_prompts_cultivo ON prompts_ia(cultivo);
+CREATE INDEX IF NOT EXISTS idx_prompts_variedad ON prompts_ia(variedad);
+CREATE INDEX IF NOT EXISTS idx_prompts_activo ON prompts_ia(activo);
 
 -- Seed inicial (insertar solo si la tabla está vacía)
 INSERT INTO prompts_ia (
