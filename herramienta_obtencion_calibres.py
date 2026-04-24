@@ -43,7 +43,7 @@ DOCUMENT_CONFIG = "calibres"
 LOGGER = logging.getLogger(__name__)
 DB_FRUTA_PATH = r"X:\BasesSQLite\DBfruta.sqlite"
 CALIBRES_IA_HISTORY_DB_ENV = "HARVESTSYNC_CALIBRES_IA_DB_PATH"
-CALIBRES_IA_HISTORY_DB_DEFAULT_PATH = r"\Personal\C\BasesSQLite\DBcalibres_ia.sqlite"
+CALIBRES_IA_HISTORY_DB_DEFAULT_PATH = r"\\Personal\C\BasesSQLite\DBcalibres_ia.sqlite"
 CALIBRES_CALIBRADOR = [f"CAL {idx}" for idx in range(10)]
 FILTRO_CALIBRADOR_CAMPANA = "2026"
 FILTRO_CALIBRADOR_EMPRESA = "1"
@@ -268,17 +268,46 @@ class CalibresIAHistoryRepository:
 
     def __init__(self, db_path: str | None = None) -> None:
         configured = (db_path or os.getenv(CALIBRES_IA_HISTORY_DB_ENV, "")).strip()
-        self.db_path = configured or CALIBRES_IA_HISTORY_DB_DEFAULT_PATH
+        self.db_path = self._resolve_db_path(configured or CALIBRES_IA_HISTORY_DB_DEFAULT_PATH)
         self._initialized = False
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _resolve_db_path(raw_path: str) -> str:
+        path = str(raw_path or "").strip()
+        if path.startswith("\\") and not path.startswith("\\\\"):
+            raise ValueError(
+                "Ruta UNC mal formada para histórico IA: debe iniciar con doble barra (\\\\servidor\\recurso)."
+            )
+        return path
+
+    @staticmethod
+    def _get_parent_dir(db_path: str) -> str:
+        return os.path.dirname(db_path)
+
+    def _validate_parent_dir_exists(self) -> tuple[str, bool]:
+        parent_dir = self._get_parent_dir(self.db_path)
+        if not parent_dir:
+            raise ValueError(f"No se pudo resolver la carpeta padre del histórico IA: {self.db_path}")
+        parent_exists = os.path.isdir(parent_dir)
+        LOGGER.info("Histórico IA - ruta final resuelta: %s", self.db_path)
+        LOGGER.info("Histórico IA - carpeta padre existe=%s path=%s", parent_exists, parent_dir)
+        print(f"[CalibresIAHistoryRepository] Ruta final resuelta: {self.db_path}")
+        print(f"[CalibresIAHistoryRepository] Carpeta padre existe: {parent_exists} ({parent_dir})")
+        if not parent_exists:
+            raise FileNotFoundError(
+                "No existe la carpeta padre para guardar histórico IA: "
+                f"{parent_dir}. Revise la ruta UNC en {CALIBRES_IA_HISTORY_DB_ENV}."
+            )
+        return parent_dir, parent_exists
 
     def ensure_schema(self) -> None:
         with self._lock:
             if self._initialized:
                 return
-            db_file = Path(self.db_path)
-            db_file.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(str(db_file)) as conn:
+            self._validate_parent_dir_exists()
+            db_exists_before = os.path.exists(self.db_path)
+            with sqlite3.connect(self.db_path) as conn:
                 conn.execute("PRAGMA busy_timeout = 5000;")
                 conn.execute(
                     """
@@ -361,6 +390,17 @@ class CalibresIAHistoryRepository:
                     """
                 )
                 conn.commit()
+            db_exists_after = os.path.exists(self.db_path)
+            LOGGER.info(
+                "Histórico IA - archivo sqlite previo=%s actual=%s path=%s",
+                db_exists_before,
+                db_exists_after,
+                self.db_path,
+            )
+            print(
+                "[CalibresIAHistoryRepository] Archivo sqlite "
+                f"previo={db_exists_before} actual={db_exists_after} ({self.db_path})"
+            )
             self._initialized = True
 
     def save_comparison(self, rows: list[dict[str, Any]]) -> int:
