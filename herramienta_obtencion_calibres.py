@@ -109,6 +109,75 @@ def clasificar_calidad_error(error_abs_medio: float) -> str:
     return "MUY_MALA"
 
 
+def calcular_sesgo_por_calibre(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Calcula sesgo medio IA-Real normalizado por CAL0..CAL9 sobre filas filtradas."""
+    if not rows:
+        return {
+            "filas": [],
+            "resumen": {
+                "total_registros": 0,
+                "calibre_mas_sobreestimado": "-",
+                "sesgo_max": 0.0,
+                "calibre_mas_infraestimado": "-",
+                "sesgo_min": 0.0,
+                "tendencia_general": "Sin datos",
+            },
+            "texto_resumen": "Sin registros para calcular sesgo por calibre.",
+        }
+
+    filas: list[dict[str, Any]] = []
+    for idx in range(10):
+        key_ia = f"ia_cal{idx}"
+        key_real = f"real_norm_cal{idx}"
+        media_ia = sum(float(row.get(key_ia) or 0.0) for row in rows) / len(rows)
+        media_real = sum(float(row.get(key_real) or 0.0) for row in rows) / len(rows)
+        sesgo = media_ia - media_real
+        if sesgo > 5.0:
+            interpretacion = "IA sobreestima"
+        elif sesgo < -5.0:
+            interpretacion = "IA infraestima"
+        else:
+            interpretacion = "Ajustado"
+        filas.append(
+            {
+                "calibre": f"CAL {idx}",
+                "media_ia": media_ia,
+                "media_real": media_real,
+                "sesgo": sesgo,
+                "interpretacion": interpretacion,
+            }
+        )
+
+    fila_max = max(filas, key=lambda item: item["sesgo"])
+    fila_min = min(filas, key=lambda item: item["sesgo"])
+    sesgo_global = sum(item["sesgo"] for item in filas) / len(filas)
+    if sesgo_global > 1.0:
+        tendencia = "Desplazamiento global de IA hacia mayor porcentaje en calibres analizados"
+    elif sesgo_global < -1.0:
+        tendencia = "Desplazamiento global de IA hacia menor porcentaje en calibres analizados"
+    else:
+        tendencia = "Sin desplazamiento global relevante"
+
+    resumen = {
+        "total_registros": len(rows),
+        "calibre_mas_sobreestimado": fila_max["calibre"],
+        "sesgo_max": fila_max["sesgo"],
+        "calibre_mas_infraestimado": fila_min["calibre"],
+        "sesgo_min": fila_min["sesgo"],
+        "tendencia_general": tendencia,
+    }
+    texto_resumen = (
+        "[Sesgo IA por calibre]\n"
+        f"Registros analizados: {resumen['total_registros']}\n"
+        f"Más sobreestimado: {resumen['calibre_mas_sobreestimado']} "
+        f"(sesgo IA-Real={resumen['sesgo_max']:.2f} pp)\n"
+        f"Más infraestimado: {resumen['calibre_mas_infraestimado']} "
+        f"(sesgo IA-Real={resumen['sesgo_min']:.2f} pp)\n"
+        f"Tendencia general: {resumen['tendencia_general']}"
+    )
+    return {"filas": filas, "resumen": resumen, "texto_resumen": texto_resumen}
+
+
 def _valor_a_float(value: Any, default: float = 0.0) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -492,16 +561,15 @@ class CalibresIAHistoryRepository:
             raise LookupError("La tabla comparaciones_calibres no existe en la base histórica IA.") from exc
         raise exc
 
-    def list_comparisons(
-        self,
+    @staticmethod
+    def _build_filtros_sql(
         *,
         boleta: str = "",
         albaran: str = "",
         variedad: str = "",
         cultivo: str = "",
         calidad: str = "",
-        limit: int = 500,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[str], list[Any]]:
         filtros_sql: list[str] = []
         params: list[Any] = []
         if boleta.strip():
@@ -529,7 +597,25 @@ class CalibresIAHistoryRepository:
                 ) = ?"""
             )
             params.append(calidad_limpia)
+        return filtros_sql, params
 
+    def list_comparisons(
+        self,
+        *,
+        boleta: str = "",
+        albaran: str = "",
+        variedad: str = "",
+        cultivo: str = "",
+        calidad: str = "",
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        filtros_sql, params = self._build_filtros_sql(
+            boleta=boleta,
+            albaran=albaran,
+            variedad=variedad,
+            cultivo=cultivo,
+            calidad=calidad,
+        )
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
             SELECT
@@ -552,6 +638,61 @@ class CalibresIAHistoryRepository:
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
                     ELSE 'MUY_MALA'
                 END AS calidad
+            FROM comparaciones_calibres
+            {where_sql}
+            ORDER BY datetime(fecha_registro) DESC, id DESC
+            LIMIT ?
+        """
+        params.append(max(1, int(limit)))
+        try:
+            with self._connect_readonly() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as exc:
+            self._parse_tabla_no_existe(exc)
+        return [dict(row) for row in rows]
+
+    def list_comparisons_for_bias(
+        self,
+        *,
+        boleta: str = "",
+        albaran: str = "",
+        variedad: str = "",
+        cultivo: str = "",
+        calidad: str = "",
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        filtros_sql, params = self._build_filtros_sql(
+            boleta=boleta,
+            albaran=albaran,
+            variedad=variedad,
+            cultivo=cultivo,
+            calidad=calidad,
+        )
+        where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
+        sql = f"""
+            SELECT
+                id,
+                fecha_registro,
+                boleta,
+                albaran,
+                variedad,
+                cultivo,
+                id_foto,
+                modelo_ia,
+                confianza_ia,
+                calibre_dominante_ia,
+                calibre_dominante_real,
+                error_absoluto_medio,
+                error_total_absoluto,
+                CASE
+                    WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
+                    WHEN COALESCE(error_absoluto_medio, 999999) <= 10 THEN 'ACEPTABLE'
+                    WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
+                    ELSE 'MUY_MALA'
+                END AS calidad,
+                ia_cal0, ia_cal1, ia_cal2, ia_cal3, ia_cal4, ia_cal5, ia_cal6, ia_cal7, ia_cal8, ia_cal9,
+                real_norm_cal0, real_norm_cal1, real_norm_cal2, real_norm_cal3, real_norm_cal4,
+                real_norm_cal5, real_norm_cal6, real_norm_cal7, real_norm_cal8, real_norm_cal9
             FROM comparaciones_calibres
             {where_sql}
             ORDER BY datetime(fecha_registro) DESC, id DESC
@@ -588,33 +729,13 @@ class CalibresIAHistoryRepository:
         cultivo: str = "",
         calidad: str = "",
     ) -> dict[str, Any]:
-        filtros_sql: list[str] = []
-        params: list[Any] = []
-        if boleta.strip():
-            filtros_sql.append("CAST(COALESCE(boleta, '') AS TEXT) LIKE ?")
-            params.append(f"%{boleta.strip()}%")
-        if albaran.strip():
-            filtros_sql.append("UPPER(COALESCE(albaran, '')) LIKE UPPER(?)")
-            params.append(f"%{albaran.strip()}%")
-        if variedad.strip():
-            filtros_sql.append("UPPER(COALESCE(variedad, '')) LIKE UPPER(?)")
-            params.append(f"%{variedad.strip()}%")
-        if cultivo.strip():
-            filtros_sql.append("UPPER(COALESCE(cultivo, '')) LIKE UPPER(?)")
-            params.append(f"%{cultivo.strip()}%")
-        calidad_limpia = calidad.strip().upper()
-        if calidad_limpia in {"BUENA", "ACEPTABLE", "MALA", "MUY_MALA"}:
-            filtros_sql.append(
-                """(
-                    CASE
-                        WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
-                        WHEN COALESCE(error_absoluto_medio, 999999) <= 10 THEN 'ACEPTABLE'
-                        WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
-                        ELSE 'MUY_MALA'
-                    END
-                ) = ?"""
-            )
-            params.append(calidad_limpia)
+        filtros_sql, params = self._build_filtros_sql(
+            boleta=boleta,
+            albaran=albaran,
+            variedad=variedad,
+            cultivo=cultivo,
+            calidad=calidad,
+        )
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql_base = f"""
             SELECT
@@ -779,6 +900,8 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         self.transient(parent.winfo_toplevel())
         self.history_repo = history_repo
         self._current_rows: dict[str, int] = {}
+        self._current_rows_data: list[dict[str, Any]] = []
+        self._ultimo_texto_sesgo: str = "Sin registros para calcular sesgo por calibre."
 
         self.boleta_var = tk.StringVar()
         self.albaran_var = tk.StringVar()
@@ -792,6 +915,9 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 "Dominante IA frecuente=- | Dominante real frecuente=- | "
                 "BUENA=0 | ACEPTABLE=0 | MALA=0 | MUY_MALA=0"
             )
+        )
+        self.resumen_sesgo_var = tk.StringVar(
+            value="Sesgo IA por calibre: sin datos (aplique filtros y ejecute búsqueda)."
         )
 
         self._build_ui()
@@ -895,11 +1021,44 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         scroll_x.grid(row=1, column=0, sticky="ew")
         self.tree_historial.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
+        frame_sesgo = ttk.LabelFrame(container, text="Análisis de sesgo por calibre", padding=6)
+        frame_sesgo.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        frame_sesgo.columnconfigure(0, weight=1)
+
+        sesgo_cols = ("calibre", "media_ia", "media_real", "sesgo", "interpretacion")
+        self.tree_sesgo = ttk.Treeview(frame_sesgo, columns=sesgo_cols, show="headings", height=7)
+        labels_sesgo = {
+            "calibre": "Calibre",
+            "media_ia": "Media IA %",
+            "media_real": "Media real normalizado %",
+            "sesgo": "Sesgo medio IA-Real",
+            "interpretacion": "Interpretación",
+        }
+        widths_sesgo = {
+            "calibre": 85,
+            "media_ia": 140,
+            "media_real": 190,
+            "sesgo": 160,
+            "interpretacion": 180,
+        }
+        for col in sesgo_cols:
+            self.tree_sesgo.heading(col, text=labels_sesgo[col])
+            self.tree_sesgo.column(col, width=widths_sesgo[col], anchor="w")
+        self.tree_sesgo.grid(row=0, column=0, sticky="ew")
+        ttk.Label(frame_sesgo, textvariable=self.resumen_sesgo_var, foreground="#1f618d", wraplength=1180).grid(
+            row=1, column=0, sticky="ew", pady=(6, 4)
+        )
+        ttk.Button(frame_sesgo, text="Copiar resumen sesgo", command=self._copiar_resumen_sesgo).grid(
+            row=2, column=0, sticky="e"
+        )
+
     def _buscar_historico(self) -> None:
         self.estado_var.set("Consultando histórico IA...")
         for item in self.tree_historial.get_children():
             self.tree_historial.delete(item)
         self._current_rows.clear()
+        self._current_rows_data = []
+        self._limpiar_panel_sesgo()
 
         filtros = {
             "boleta": self.boleta_var.get().strip(),
@@ -911,7 +1070,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
 
         def worker() -> None:
             try:
-                rows = self.history_repo.list_comparisons(**filtros)
+                rows = self.history_repo.list_comparisons_for_bias(**filtros)
                 summary = self.history_repo.get_summary(**filtros)
                 self.after(0, lambda: self._on_busqueda_ok(rows, summary))
             except Exception as exc:  # noqa: BLE001
@@ -962,6 +1121,9 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 total_muy_mala=summary.get("total_muy_mala", 0),
             )
         )
+        analisis_sesgo = calcular_sesgo_por_calibre(rows)
+        self._current_rows_data = rows
+        self._render_sesgo(analisis_sesgo)
 
     def _on_busqueda_error(self, exc: Exception) -> None:
         self.estado_var.set(f"Error consultando histórico IA: {exc}")
@@ -969,7 +1131,51 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "Registros=0 | Error medio global=- | Error total medio=- | Dominante IA frecuente=- | Dominante real frecuente=- | "
             "BUENA=0 | ACEPTABLE=0 | MALA=0 | MUY_MALA=0"
         )
+        self._limpiar_panel_sesgo()
         messagebox.showerror("Histórico IA", f"No se pudo consultar la base histórica:\n{exc}", parent=self)
+
+    def _render_sesgo(self, analisis: dict[str, Any]) -> None:
+        for item in self.tree_sesgo.get_children():
+            self.tree_sesgo.delete(item)
+        for fila in analisis.get("filas", []):
+            self.tree_sesgo.insert(
+                "",
+                "end",
+                values=(
+                    fila.get("calibre", "-"),
+                    self._fmt_number(fila.get("media_ia")),
+                    self._fmt_number(fila.get("media_real")),
+                    self._fmt_number(fila.get("sesgo")),
+                    fila.get("interpretacion", "-"),
+                ),
+            )
+        resumen = analisis.get("resumen", {})
+        if int(resumen.get("total_registros", 0)) <= 0:
+            self.resumen_sesgo_var.set("Sesgo IA por calibre: sin registros para los filtros aplicados.")
+        else:
+            self.resumen_sesgo_var.set(
+                "Más sobreestimado={calibre_max} ({sesgo_max}) | Más infraestimado={calibre_min} ({sesgo_min}) | "
+                "Tendencia general={tendencia}".format(
+                    calibre_max=resumen.get("calibre_mas_sobreestimado", "-"),
+                    sesgo_max=self._fmt_number(resumen.get("sesgo_max")),
+                    calibre_min=resumen.get("calibre_mas_infraestimado", "-"),
+                    sesgo_min=self._fmt_number(resumen.get("sesgo_min")),
+                    tendencia=resumen.get("tendencia_general", "Sin datos"),
+                )
+            )
+        self._ultimo_texto_sesgo = str(analisis.get("texto_resumen", "") or "Sin registros para calcular sesgo por calibre.")
+
+    def _limpiar_panel_sesgo(self) -> None:
+        self._render_sesgo(calcular_sesgo_por_calibre([]))
+
+    def _copiar_resumen_sesgo(self) -> None:
+        texto = self._ultimo_texto_sesgo.strip() or "Sin registros para calcular sesgo por calibre."
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(texto)
+            self.estado_var.set("Resumen de sesgo copiado al portapapeles.")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Histórico IA", f"No se pudo copiar el resumen de sesgo:\n{exc}", parent=self)
 
     @staticmethod
     def _fmt_number(value: Any) -> str:
