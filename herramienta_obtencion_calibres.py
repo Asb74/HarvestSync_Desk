@@ -1060,30 +1060,146 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return ""
         return f"{url_base}/fotos/{ruta_limpia}"
 
+    @staticmethod
+    def _parse_validacion_ia_result(result: dict[str, Any]) -> dict[str, Any]:
+        """Parsea result['output_text'] como JSON y devuelve datos listos para UI."""
+        output_text = result.get("output_text", "")
+        parsed_output: dict[str, Any] | None = None
+
+        if isinstance(output_text, dict):
+            parsed_output = output_text
+        elif isinstance(output_text, str):
+            output_text_clean = output_text.strip()
+            if output_text_clean:
+                try:
+                    first_pass = json.loads(output_text_clean)
+                    if isinstance(first_pass, dict):
+                        parsed_output = first_pass
+                    elif isinstance(first_pass, str):
+                        second_pass = json.loads(first_pass)
+                        if isinstance(second_pass, dict):
+                            parsed_output = second_pass
+                except json.JSONDecodeError:
+                    parsed_output = None
+
+        parsed_output = parsed_output or {}
+        alertas = parsed_output.get("alertas", [])
+        if isinstance(alertas, str):
+            alertas = [alertas]
+        if not isinstance(alertas, list):
+            alertas = [str(alertas)]
+
+        apta_val = parsed_output.get("apta")
+        if isinstance(apta_val, bool):
+            apta_texto = "Sí" if apta_val else "No"
+        else:
+            apta_texto = "-"
+
+        return {
+            "apta": apta_texto,
+            "confianza": parsed_output.get("confianza", "-"),
+            "oclusion": parsed_output.get("oclusion", "-"),
+            "patron_visible": parsed_output.get("patron_visible", "-"),
+            "box_centrado": parsed_output.get("box_centrado", "-"),
+            "resumen": parsed_output.get("resumen", "-"),
+            "alertas": alertas,
+            "recomendacion": parsed_output.get("recomendacion", "-"),
+            "modelo": result.get("model", "-"),
+            "raw_id": result.get("raw_id", "-"),
+            "json_parse_ok": bool(parsed_output),
+            "output_text_original": output_text,
+            "json_parseado": parsed_output,
+        }
+
     def _mostrar_resultado_ia(self, id_foto: str, image_ref: str, result: dict[str, Any]) -> None:
         win = tk.Toplevel(self)
         win.title(f"Resultado Validación IA - {id_foto}")
-        win.geometry("760x520")
-        win.minsize(600, 420)
+        win.geometry("860x620")
+        win.minsize(700, 500)
 
         cont = ttk.Frame(win, padding=10)
         cont.grid(row=0, column=0, sticky="nsew")
         win.rowconfigure(0, weight=1)
         win.columnconfigure(0, weight=1)
-        cont.rowconfigure(1, weight=1)
+        cont.rowconfigure(2, weight=1)
         cont.columnconfigure(0, weight=1)
+        parsed = self._parse_validacion_ia_result(result)
 
         ttk.Label(cont, text=f"Foto: {id_foto}", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(cont, text=f"URL enviada: {image_ref}", foreground="#1b4f72", wraplength=720).grid(row=0, column=1, sticky="w")
+        ttk.Label(cont, text=f"URL enviada: {image_ref}", foreground="#1b4f72", wraplength=820).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(2, 8),
+        )
 
-        text = tk.Text(cont, wrap="word")
-        text.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
-        scroll = ttk.Scrollbar(cont, orient="vertical", command=text.yview)
-        scroll.grid(row=1, column=2, sticky="ns", pady=(8, 0))
+        resumen_frame = ttk.LabelFrame(cont, text="Validación IA (operativa)")
+        resumen_frame.grid(row=2, column=0, sticky="nsew")
+        resumen_frame.columnconfigure(1, weight=1)
+
+        filas = [
+            ("Apta", parsed["apta"]),
+            ("Confianza", parsed["confianza"]),
+            ("Oclusión", parsed["oclusion"]),
+            ("Patrón visible", parsed["patron_visible"]),
+            ("Box centrado", parsed["box_centrado"]),
+            ("Resumen", parsed["resumen"]),
+            ("Recomendación", parsed["recomendacion"]),
+            ("Modelo", parsed["modelo"]),
+            ("raw_id", parsed["raw_id"]),
+        ]
+        for idx, (label, value) in enumerate(filas):
+            ttk.Label(resumen_frame, text=f"{label}:", font=("Segoe UI", 9, "bold")).grid(
+                row=idx,
+                column=0,
+                sticky="nw",
+                padx=(8, 6),
+                pady=3,
+            )
+            ttk.Label(resumen_frame, text=str(value), wraplength=620, justify="left").grid(
+                row=idx,
+                column=1,
+                sticky="w",
+                padx=(0, 8),
+                pady=3,
+            )
+
+        alertas = parsed["alertas"]
+        alertas_texto = "\n".join(f"• {item}" for item in alertas) if alertas else "Sin alertas"
+        row_alertas = len(filas)
+        ttk.Label(resumen_frame, text="Alertas:", font=("Segoe UI", 9, "bold")).grid(
+            row=row_alertas,
+            column=0,
+            sticky="nw",
+            padx=(8, 6),
+            pady=3,
+        )
+        ttk.Label(resumen_frame, text=alertas_texto, wraplength=620, justify="left").grid(
+            row=row_alertas,
+            column=1,
+            sticky="w",
+            padx=(0, 8),
+            pady=3,
+        )
+
+        bruto_frame = ttk.LabelFrame(cont, text="JSON bruto")
+        bruto_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        bruto_frame.rowconfigure(0, weight=1)
+        bruto_frame.columnconfigure(0, weight=1)
+        cont.rowconfigure(3, weight=1)
+
+        text = tk.Text(bruto_frame, wrap="word", height=10)
+        text.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(bruto_frame, orient="vertical", command=text.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
         text.configure(yscrollcommand=scroll.set)
 
-        pretty = json.dumps(result, ensure_ascii=False, indent=2)
-        text.insert("1.0", pretty)
+        if parsed["json_parse_ok"]:
+            raw_pretty = json.dumps(parsed["json_parseado"], ensure_ascii=False, indent=2)
+        else:
+            raw_pretty = str(parsed["output_text_original"])
+        payload_pretty = json.dumps(result, ensure_ascii=False, indent=2)
+        text.insert("1.0", f"output_text (original o parseado):\n{raw_pretty}\n\npayload completo:\n{payload_pretty}")
         text.configure(state="disabled")
 
     def _on_toggle_foto(self, id_foto: str, usar_en_analisis: bool) -> None:
