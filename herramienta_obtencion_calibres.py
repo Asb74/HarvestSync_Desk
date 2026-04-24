@@ -337,7 +337,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         tab_validacion_ia.columnconfigure(0, weight=1)
         toolbar_ia = ttk.Frame(tab_validacion_ia)
         toolbar_ia.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        toolbar_ia.columnconfigure(3, weight=1)
+        toolbar_ia.columnconfigure(4, weight=1)
         self.btn_validacion_ia = ttk.Button(toolbar_ia, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
         self.btn_validacion_ia.grid(row=0, column=0, padx=(0, 6))
         self.btn_validar_lote_ia = ttk.Button(toolbar_ia, text="🤖 Validar lote IA", command=self._validar_lote_ia)
@@ -350,6 +350,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
             command=self._ejecutar_estimacion_calibres_ia,
         )
         self.btn_estimacion_calibres_ia.grid(row=0, column=3, padx=(0, 6))
+        self.btn_ver_detalle_estimacion_ia = ttk.Button(
+            toolbar_ia,
+            text="📄 Ver detalle IA",
+            command=self._ver_detalle_estimacion_ia_seleccionada,
+        )
+        self.btn_ver_detalle_estimacion_ia.grid(row=0, column=4, padx=(0, 6))
 
         ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
         ia_frame.grid(row=1, column=0, sticky="nsew")
@@ -415,6 +421,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.tree_estimacion_ia.heading(col, text=headers_estimacion[col])
             self.tree_estimacion_ia.column(col, width=widths_estimacion[col], anchor="w")
         self.tree_estimacion_ia.grid(row=0, column=0, sticky="nsew")
+        self.tree_estimacion_ia.bind("<Double-1>", self._on_double_click_estimacion_ia)
         self.resumen_estimacion_ia_var = tk.StringVar(
             value="Estimación IA experimental: evaluadas=0 | aptas=0 | confianza media=- | distribución consolidada=-"
         )
@@ -1366,21 +1373,52 @@ class ObtencionCalibresWindow(BaseToolWindow):
         return {}
 
     @staticmethod
-    def _parse_estimacion_ia_result(result: dict[str, Any]) -> dict[str, Any]:
-        output_text = result.get("output_text", "")
-        parsed_output = ObtencionCalibresWindow._parse_output_json(output_text)
-        if not parsed_output and isinstance(result.get("json_parseado"), dict):
-            parsed_output = result.get("json_parseado", {})
-        if not parsed_output and isinstance(result.get("output"), dict):
-            parsed_output = result.get("output", {})
-        advertencias = parsed_output.get("advertencias", [])
-        if isinstance(advertencias, str):
-            advertencias = [advertencias]
-        if not isinstance(advertencias, list):
-            advertencias = [str(advertencias)]
+    def _parse_json_ia_output(output_text: Any) -> tuple[dict[str, Any] | None, str | None]:
+        if isinstance(output_text, dict):
+            return output_text, None
+        if not isinstance(output_text, str):
+            return None, "output_text no es string ni objeto JSON."
 
-        distribucion_raw = parsed_output.get("distribucion", [])
+        output_text_clean = output_text.strip()
+        if not output_text_clean:
+            return None, "output_text vacío."
+
+        candidates = [output_text_clean]
+        if "```" in output_text_clean:
+            for part in output_text_clean.split("```"):
+                part_clean = part.strip()
+                if not part_clean:
+                    continue
+                if part_clean.lower().startswith("json"):
+                    part_clean = part_clean[4:].strip()
+                candidates.append(part_clean)
+
+        last_error = "JSON IA no parseable."
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed, None
+                if isinstance(parsed, str):
+                    parsed_nested = json.loads(parsed)
+                    if isinstance(parsed_nested, dict):
+                        return parsed_nested, None
+            except json.JSONDecodeError as exc:
+                last_error = f"JSON IA no parseable: {exc.msg} (pos {exc.pos})."
+        return None, last_error
+
+    @staticmethod
+    def _normalizar_estimacion_calibres_ia(parsed: dict[str, Any]) -> dict[str, Any]:
+        advertencias_raw = parsed.get("advertencias", [])
+        if isinstance(advertencias_raw, str):
+            advertencias = [advertencias_raw]
+        elif isinstance(advertencias_raw, list):
+            advertencias = [str(item).strip() for item in advertencias_raw if str(item).strip()]
+        else:
+            advertencias = [str(advertencias_raw).strip()] if str(advertencias_raw).strip() else []
+
         distribucion: list[dict[str, Any]] = []
+        distribucion_raw = parsed.get("distribucion", [])
         if isinstance(distribucion_raw, list):
             for item in distribucion_raw:
                 if not isinstance(item, dict):
@@ -1396,63 +1434,79 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     }
                 )
 
-        apta_raw = parsed_output.get("apta_para_estimacion")
+        apta_raw = parsed.get("apta_para_estimacion")
         if isinstance(apta_raw, bool):
             apta_texto = "Sí" if apta_raw else "No"
         else:
             apta_texto = "-"
 
-        confianza = parsed_output.get("confianza", "-")
-        frutos_estimados = parsed_output.get("frutos_visibles_estimados", "-")
-        calibre_dominante = parsed_output.get("calibre_dominante", "-")
-        resumen = parsed_output.get("resumen", "-")
-
-        campos_esperados = (
+        campos_clave = (
             "apta_para_estimacion",
             "confianza",
             "frutos_visibles_estimados",
             "calibre_dominante",
             "distribucion",
-            "advertencias",
-            "resumen",
         )
-        campos_presentes = [campo for campo in campos_esperados if campo in parsed_output]
-        faltantes = [campo for campo in campos_esperados if campo not in parsed_output]
-        datos_utiles = bool(
-            isinstance(parsed_output, dict)
-            and parsed_output
-            and apta_texto in ("Sí", "No")
-            and (
-                ObtencionCalibresWindow._confianza_a_float(confianza) is not None
-                or ObtencionCalibresWindow._confianza_a_float(frutos_estimados) is not None
-                or str(calibre_dominante).strip() not in ("", "-", "null", "none")
-                or bool(distribucion)
-            )
-        )
-        diagnostico = ""
-        if not parsed_output:
-            diagnostico = "Respuesta IA vacía o JSON inválido."
-        elif not campos_presentes:
-            diagnostico = "Respuesta IA sin campos esperados."
-        elif not datos_utiles:
-            diagnostico = "Respuesta IA sin datos útiles para estimación."
-        elif faltantes:
-            diagnostico = "Respuesta IA parcial: faltan campos esperados."
+        faltantes = [campo for campo in campos_clave if campo not in parsed]
+        es_valida = not faltantes and apta_texto in ("Sí", "No")
 
         return {
             "apta_para_estimacion": apta_texto,
-            "confianza": confianza,
-            "frutos_visibles_estimados": frutos_estimados,
-            "calibre_dominante": calibre_dominante,
+            "confianza": parsed.get("confianza", "-"),
+            "frutos_visibles_estimados": parsed.get("frutos_visibles_estimados", "-"),
+            "calibre_dominante": parsed.get("calibre_dominante", "-"),
             "distribucion": distribucion,
             "advertencias": advertencias,
-            "resumen": resumen,
-            "json_parse_ok": bool(parsed_output),
+            "resumen": parsed.get("resumen", "-"),
+            "campos_faltantes": faltantes,
+            "es_valida": es_valida,
+        }
+
+    @staticmethod
+    def _parse_estimacion_ia_result(result: dict[str, Any]) -> dict[str, Any]:
+        output_text = result.get("output_text", "")
+        parsed_output, parse_error = ObtencionCalibresWindow._parse_json_ia_output(output_text)
+        if parsed_output is None and isinstance(result.get("json_parseado"), dict):
+            parsed_output = result.get("json_parseado")
+            parse_error = None
+        if parsed_output is None and isinstance(result.get("output"), dict):
+            parsed_output = result.get("output")
+            parse_error = None
+
+        if not isinstance(parsed_output, dict):
+            return {
+                "apta_para_estimacion": "-",
+                "confianza": "-",
+                "frutos_visibles_estimados": "-",
+                "calibre_dominante": "-",
+                "distribucion": [],
+                "advertencias": [],
+                "resumen": "-",
+                "json_parse_ok": False,
+                "json_parseado": None,
+                "output_text_original": output_text,
+                "campos_faltantes": [],
+                "diagnostico": parse_error or "JSON IA no parseable",
+                "error_tipo": "parse",
+                "es_valida": False,
+            }
+
+        normalized = ObtencionCalibresWindow._normalizar_estimacion_calibres_ia(parsed_output)
+        faltantes = normalized.get("campos_faltantes", [])
+        es_valida = bool(normalized.get("es_valida"))
+        diagnostico = ""
+        error_tipo = ""
+        if not es_valida:
+            diagnostico = "Respuesta IA sin campos esperados"
+            error_tipo = "campos"
+
+        return {
+            **normalized,
+            "json_parse_ok": True,
             "json_parseado": parsed_output,
             "output_text_original": output_text,
-            "datos_utiles": datos_utiles,
-            "campos_faltantes": faltantes,
             "diagnostico": diagnostico,
+            "error_tipo": error_tipo,
         }
 
     def _get_ia_resultados_muestra_actual(self) -> dict[str, dict[str, Any]]:
@@ -1559,6 +1613,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_validar_lote_ia,
             self.btn_usar_solo_aptas_ia,
             self.btn_estimacion_calibres_ia,
+            self.btn_ver_detalle_estimacion_ia,
             self.btn_preparar_analisis,
             self.btn_ejecutar_flujo,
         ):
@@ -1694,6 +1749,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
         cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
         rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
         diametro_patron = self._config.diametro_patron_mm if self._config else 94.0
+        if not rangos:
+            messagebox.showwarning(
+                "Obtención calibres",
+                f"No hay rangos de calibres configurados para cultivo '{cultivo or '-'}'.",
+                parent=self,
+            )
+            return
         service_url, _source, resolve_error = self.data_service.resolve_url_servicio_ia()
         if not service_url:
             messagebox.showerror("Obtención calibres", f"No hay URL de servicio IA: {resolve_error or '-'}", parent=self)
@@ -1710,9 +1772,19 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "cultivo": cultivo,
             "diametro_patron_mm": diametro_patron,
             "rangos_calibres": rangos,
+            "respuesta_esperada": {
+                "formato": "json_estricto",
+                "campos_minimos": [
+                    "apta_para_estimacion",
+                    "confianza",
+                    "frutos_visibles_estimados",
+                    "calibre_dominante",
+                    "distribucion",
+                ],
+            },
             "nota": (
                 "Estimación IA experimental para distribución aproximada por foto. "
-                "No sustituye análisis local ni resultado definitivo."
+                "Devuelve únicamente JSON estricto sin markdown."
             ),
         }
 
@@ -1740,6 +1812,14 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     contexto = dict(contexto_base)
                     contexto["id_foto"] = id_foto
                     contexto["image_url"] = image_url_for_ai
+                    LOGGER.info(
+                        "Estimación IA request: id_foto=%s image_url=%s task=%s cultivo=%s rangos=%s",
+                        id_foto,
+                        image_url_for_ai,
+                        "estimacion_calibres",
+                        cultivo,
+                        len(rangos),
+                    )
                     result = call_analyze_image(
                         server_url=service_url,
                         image_url=image_url_for_ai,
@@ -1749,14 +1829,25 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     )
                     parsed = self._parse_estimacion_ia_result(result)
                     row.update(parsed)
-                    row["error"] = not bool(parsed.get("datos_utiles"))
+                    row["task_enviada"] = "estimacion_calibres"
+                    row["image_url"] = image_url_for_ai
+                    row["id_foto"] = id_foto
+                    row["error"] = not bool(parsed.get("es_valida"))
                     if row["error"]:
-                        row["estado"] = parsed.get("diagnostico") or "Respuesta IA sin campos esperados"
+                        error_tipo = str(parsed.get("error_tipo", "")).strip()
+                        if error_tipo == "parse":
+                            row["estado"] = "JSON IA no parseable"
+                        elif error_tipo == "campos":
+                            row["estado"] = "Respuesta IA sin campos esperados"
+                        else:
+                            row["estado"] = parsed.get("diagnostico") or "Respuesta IA sin campos esperados"
                     else:
                         row["estado"] = "OK"
                     row["raw_result"] = result
                 except Exception as exc:  # noqa: BLE001
-                    row["estado"] = str(exc)
+                    row["task_enviada"] = "estimacion_calibres"
+                    row["estado"] = "Error servicio IA"
+                    row["diagnostico"] = f"Error servicio IA: {exc}"
                     row["error"] = True
                 finally:
                     resultados_estimacion[id_foto] = row
@@ -2255,6 +2346,70 @@ class ObtencionCalibresWindow(BaseToolWindow):
             raw_pretty = str(parsed["output_text_original"])
         payload_pretty = json.dumps(result, ensure_ascii=False, indent=2)
         text.insert("1.0", f"output_text (original o parseado):\n{raw_pretty}\n\npayload completo:\n{payload_pretty}")
+        text.configure(state="disabled")
+
+    def _on_double_click_estimacion_ia(self, _event: tk.Event) -> None:
+        self._ver_detalle_estimacion_ia_seleccionada()
+
+    def _ver_detalle_estimacion_ia_seleccionada(self) -> None:
+        selected = self.tree_estimacion_ia.selection()
+        if not selected:
+            messagebox.showinfo("Obtención calibres", "Seleccione una fila de estimación IA.", parent=self)
+            return
+        iid = selected[0]
+        id_foto = iid[4:] if iid.startswith("est_") else iid
+        resultados = self._get_estimacion_resultados_muestra_actual()
+        row = resultados.get(id_foto)
+        if not row:
+            messagebox.showwarning("Obtención calibres", "No hay detalle IA para la fila seleccionada.", parent=self)
+            return
+        self._mostrar_detalle_estimacion_ia(id_foto=id_foto, row=row)
+
+    def _mostrar_detalle_estimacion_ia(self, id_foto: str, row: dict[str, Any]) -> None:
+        win = tk.Toplevel(self)
+        win.title(f"Detalle Estimación IA - {id_foto}")
+        win.geometry("900x620")
+        win.minsize(760, 500)
+
+        cont = ttk.Frame(win, padding=10)
+        cont.grid(row=0, column=0, sticky="nsew")
+        win.rowconfigure(0, weight=1)
+        win.columnconfigure(0, weight=1)
+        cont.rowconfigure(1, weight=1)
+        cont.columnconfigure(0, weight=1)
+
+        task_enviada = row.get("task_enviada", "estimacion_calibres")
+        image_url = str(row.get("image_url", "-"))
+        output_text = str(row.get("output_text_original", ""))
+        parseado = row.get("json_parseado")
+        parseado_pretty = json.dumps(parseado, ensure_ascii=False, indent=2) if isinstance(parseado, dict) else "-"
+        diagnostico = str(row.get("diagnostico", "")).strip() or "-"
+
+        encabezado = (
+            f"id_foto: {id_foto}\n"
+            f"image_url: {image_url}\n"
+            f"task: {task_enviada}\n"
+            f"estado: {row.get('estado', '-')}\n"
+            f"diagnóstico: {diagnostico}"
+        )
+        ttk.Label(cont, text=encabezado, justify="left", wraplength=860).grid(row=0, column=0, sticky="w")
+
+        frame_text = ttk.LabelFrame(cont, text="Detalle respuesta IA")
+        frame_text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        frame_text.rowconfigure(0, weight=1)
+        frame_text.columnconfigure(0, weight=1)
+
+        text = tk.Text(frame_text, wrap="word")
+        text.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame_text, orient="vertical", command=text.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        text.configure(yscrollcommand=scroll.set)
+        text.insert(
+            "1.0",
+            f"output_text bruto:\n{output_text or '-'}\n\n"
+            f"json_parseado:\n{parseado_pretty}\n\n"
+            f"payload result completo:\n{json.dumps(row.get('raw_result', {}), ensure_ascii=False, indent=2)}",
+        )
         text.configure(state="disabled")
 
     def _on_toggle_foto(self, id_foto: str, usar_en_analisis: bool) -> None:
