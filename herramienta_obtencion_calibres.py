@@ -457,10 +457,16 @@ class CalibresIAHistoryRepository:
             return len(rows)
 
     def _connect_readonly(self) -> sqlite3.Connection:
-        if not os.path.exists(self.db_path):
-            raise FileNotFoundError(f"No existe la base histórica IA: {self.db_path}")
-        uri = f"file:{Path(self.db_path).as_posix()}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
+        parent_dir, parent_exists = self._validate_parent_dir_exists()
+        if not parent_exists:
+            raise FileNotFoundError(
+                "No existe la carpeta de la base histórica IA: "
+                f"{parent_dir}. Revise la ruta UNC en {CALIBRES_IA_HISTORY_DB_ENV}."
+            )
+        if not os.path.isfile(self.db_path):
+            raise FileNotFoundError("No existe la base histórica. Guarde primero una comparación.")
+
+        conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
