@@ -524,6 +524,7 @@ class CalibresIAHistoryRepository:
                         ruta_local TEXT,
                         modelo_ia TEXT,
                         prompt_version TEXT,
+                        prompt_source TEXT,
                         confianza_ia REAL,
                         calibre_dominante_ia TEXT,
                         calibre_dominante_real TEXT,
@@ -582,6 +583,8 @@ class CalibresIAHistoryRepository:
                 cols = {str(row[1]).strip().lower() for row in conn.execute("PRAGMA table_info(comparaciones_calibres)").fetchall()}
                 if "prompt_version" not in cols:
                     conn.execute("ALTER TABLE comparaciones_calibres ADD COLUMN prompt_version TEXT")
+                if "prompt_source" not in cols:
+                    conn.execute("ALTER TABLE comparaciones_calibres ADD COLUMN prompt_source TEXT")
                 conn.execute("DROP INDEX IF EXISTS ux_comp_calibres_dedupe")
                 conn.commit()
             db_exists_after = os.path.exists(self.db_path)
@@ -618,6 +621,7 @@ class CalibresIAHistoryRepository:
             "ruta_local",
             "modelo_ia",
             "prompt_version",
+            "prompt_source",
             "confianza_ia",
             "calibre_dominante_ia",
             "calibre_dominante_real",
@@ -3310,6 +3314,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
         advertencias_texto = " | ".join(str(item).strip() for item in advertencias if str(item).strip())
         raw_result = estimacion.get("raw_result", {})
         prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or PROMPT_VERSION
+        prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "legacy_unspecified"
+        cultivo_ia = str(raw_result.get("cultivo", "") or "").strip()
+        variedad_ia = str(raw_result.get("variedad", "") or "").strip()
 
         row = {
             "fecha_registro": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -3320,8 +3327,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "tipo_comparacion": str(contexto.get("tipo_comparacion", "") or "").strip(),
             "campana": self._to_int_or_none(entrega.get("Campana")),
             "empresa": self._to_int_or_none(entrega.get("Empresa")),
-            "cultivo": str(entrega.get("Cultivo", "") or "").strip(),
-            "variedad": str(entrega.get("Variedad", "") or "").strip(),
+            "cultivo": cultivo_ia or str(entrega.get("Cultivo", "") or "").strip(),
+            "variedad": variedad_ia or str(entrega.get("Variedad", "") or "").strip(),
             "socio": str(entrega.get("Socio", "") or "").strip(),
             "id_socio": self._to_int_or_none(entrega.get("IdSocio")),
             "neto": self._to_float_or_none(entrega.get("Neto")),
@@ -3330,6 +3337,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "ruta_local": ruta_local,
             "modelo_ia": str(raw_result.get("model", "") or "").strip() or "desconocido",
             "prompt_version": prompt_version,
+            "prompt_source": prompt_source,
             "confianza_ia": self._to_float_or_none(estimacion.get("confianza")),
             "calibre_dominante_ia": str(comp_foto.get("calibre_dominante_ia", "") or "").strip(),
             "calibre_dominante_real": str(comp_foto.get("calibre_dominante_real", "") or "").strip(),
@@ -3710,6 +3718,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         image_url=image_url_for_ai,
                         task="estimacion_calibres",
                         context=json.dumps(contexto, ensure_ascii=False),
+                        cultivo=cultivo,
+                        variedad="",
                         timeout_seconds=30,
                     )
                     parsed = self._parse_estimacion_ia_result(result)
