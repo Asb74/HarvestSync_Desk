@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -39,6 +40,51 @@ except Exception:  # pragma: no cover - fallback cuando PIL no está disponible
 COLLECTION_CONFIG = "Configuraciones"
 DOCUMENT_CONFIG = "calibres"
 LOGGER = logging.getLogger(__name__)
+DB_FRUTA_PATH = r"X:\BasesSQLite\DBfruta.sqlite"
+CALIBRES_CALIBRADOR = [f"CAL {idx}" for idx in range(10)]
+
+
+def normalizar_distribucion_calibres(calibres_brutos: dict[str, float]) -> dict[str, float]:
+    """Normaliza CAL 0..CAL 9 a 100% excluyendo podrido/destrío."""
+    total_calibres = sum(max(0.0, float(v or 0.0)) for v in calibres_brutos.values())
+    if total_calibres <= 0:
+        raise ValueError("No se puede normalizar: suma de CAL 0..CAL 9 es 0.")
+    return {cal: (max(0.0, float(valor or 0.0)) * 100.0 / total_calibres) for cal, valor in calibres_brutos.items()}
+
+
+def comparar_distribuciones(
+    distribucion_ia: dict[str, float],
+    distribucion_real_normalizada: dict[str, float],
+) -> dict[str, Any]:
+    """Compara IA vs real normalizado por calibre."""
+    calibres = sorted(set(distribucion_ia.keys()) | set(distribucion_real_normalizada.keys()))
+    filas: list[dict[str, Any]] = []
+    errores_abs: list[float] = []
+    for calibre in calibres:
+        pct_ia = max(0.0, float(distribucion_ia.get(calibre, 0.0) or 0.0))
+        pct_real = max(0.0, float(distribucion_real_normalizada.get(calibre, 0.0) or 0.0))
+        dif_abs = abs(pct_ia - pct_real)
+        errores_abs.append(dif_abs)
+        filas.append(
+            {
+                "calibre": calibre,
+                "ia": pct_ia,
+                "real_normalizado": pct_real,
+                "diferencia_abs": dif_abs,
+            }
+        )
+
+    dominante_ia = max(distribucion_ia.items(), key=lambda item: item[1])[0] if distribucion_ia else "-"
+    dominante_real = (
+        max(distribucion_real_normalizada.items(), key=lambda item: item[1])[0] if distribucion_real_normalizada else "-"
+    )
+    return {
+        "filas": filas,
+        "error_abs_medio": (sum(errores_abs) / len(errores_abs)) if errores_abs else 0.0,
+        "error_total_abs": sum(errores_abs),
+        "calibre_dominante_ia": dominante_ia,
+        "calibre_dominante_real": dominante_real,
+    }
 
 
 @dataclass
@@ -218,6 +264,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._ai_lote_en_curso = False
         self._ai_estimacion_en_curso = False
         self._flujo_recomendado_en_curso = False
+        self._comparacion_ia_vs_calibrador: dict[str, Any] = {}
 
         self._build_ui()
         self._cargar_configuracion()
@@ -333,11 +380,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.frame_fotos_content.bind("<Configure>", lambda _: self.canvas_fotos.configure(scrollregion=self.canvas_fotos.bbox("all")))
         self.canvas_fotos.bind("<Configure>", self._sync_fotos_width)
 
-        tab_validacion_ia.rowconfigure(1, weight=1)
+        tab_validacion_ia.rowconfigure(2, weight=1)
+        tab_validacion_ia.rowconfigure(3, weight=2)
         tab_validacion_ia.columnconfigure(0, weight=1)
         toolbar_ia = ttk.Frame(tab_validacion_ia)
         toolbar_ia.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        toolbar_ia.columnconfigure(4, weight=1)
+        toolbar_ia.columnconfigure(5, weight=1)
         self.btn_validacion_ia = ttk.Button(toolbar_ia, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
         self.btn_validacion_ia.grid(row=0, column=0, padx=(0, 6))
         self.btn_validar_lote_ia = ttk.Button(toolbar_ia, text="🤖 Validar lote IA", command=self._validar_lote_ia)
@@ -356,6 +404,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
             command=self._ver_detalle_estimacion_ia_seleccionada,
         )
         self.btn_ver_detalle_estimacion_ia.grid(row=0, column=4, padx=(0, 6))
+        self.btn_comparar_calibrador = ttk.Button(
+            toolbar_ia,
+            text="📊 Comparar IA vs calibrador",
+            command=self._comparar_ia_vs_calibrador,
+        )
+        self.btn_comparar_calibrador.grid(row=0, column=5, padx=(0, 6))
 
         ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
         ia_frame.grid(row=1, column=0, sticky="nsew")
@@ -436,6 +490,54 @@ class ObtencionCalibresWindow(BaseToolWindow):
             wraplength=980,
             justify="left",
         ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+
+        comparacion_frame = ttk.LabelFrame(tab_validacion_ia, text="Comparación IA vs calibrador normalizado", padding=6)
+        comparacion_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        comparacion_frame.rowconfigure(1, weight=1)
+        comparacion_frame.rowconfigure(3, weight=1)
+        comparacion_frame.columnconfigure(0, weight=1)
+
+        self.resumen_calibrador_var = tk.StringVar(
+            value="Calibrador total partida: Podrido=- | DesLínea=- | DesMesa=- | Destrío total=- | ΣCAL0..CAL9=-"
+        )
+        ttk.Label(comparacion_frame, textvariable=self.resumen_calibrador_var, foreground="#34495e").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        self.tree_comparacion_calibres = ttk.Treeview(
+            comparacion_frame,
+            columns=("calibre", "ia", "real_norm", "real_bruto", "dif_abs"),
+            show="headings",
+            height=6,
+        )
+        headers_comp = {
+            "calibre": "Calibre",
+            "ia": "% IA",
+            "real_norm": "% Real normalizado",
+            "real_bruto": "% Real bruto total",
+            "dif_abs": "Dif. absoluta",
+        }
+        widths_comp = {"calibre": 80, "ia": 110, "real_norm": 150, "real_bruto": 140, "dif_abs": 110}
+        for col in headers_comp:
+            self.tree_comparacion_calibres.heading(col, text=headers_comp[col])
+            self.tree_comparacion_calibres.column(col, width=widths_comp[col], anchor="w")
+        self.tree_comparacion_calibres.grid(row=1, column=0, sticky="nsew")
+
+        self.resumen_metricas_comparacion_var = tk.StringVar(
+            value="Métricas: error absoluto medio=- | error total absoluto=- | dominante IA=- | dominante real normalizado=-"
+        )
+        ttk.Label(comparacion_frame, textvariable=self.resumen_metricas_comparacion_var, foreground="#34495e").grid(
+            row=2, column=0, sticky="w", pady=(6, 2)
+        )
+        self.nota_comparacion_var = tk.StringVar(
+            value="Comparación realizada sobre distribución de calibres normalizada, excluyendo podrido y destrío."
+        )
+        ttk.Label(
+            comparacion_frame,
+            textvariable=self.nota_comparacion_var,
+            foreground="#7d6608",
+            wraplength=980,
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(2, 0))
 
         tab_patron_escala.rowconfigure(1, weight=1)
         tab_patron_escala.columnconfigure(0, weight=1)
@@ -607,6 +709,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._limpiar_resultados_frutos()
         self._limpiar_resultados_ia()
         self._limpiar_resultados_estimacion_ia()
+        self._limpiar_resultados_comparacion_calibres()
 
         def worker() -> None:
             try:
@@ -693,6 +796,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._limpiar_resultados_estimacion_ia()
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
+        self._limpiar_resultados_comparacion_calibres()
         self._current_muestra_id = id_muestra
         self._current_cards = []
         fotos = self._fotos_by_muestra.get(id_muestra, [])
@@ -1544,6 +1648,24 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.advertencias_estimacion_ia_var.set("Advertencias estimación IA experimental: -")
         self._actualizar_resumen_global()
 
+    def _limpiar_resultados_comparacion_calibres(self) -> None:
+        if hasattr(self, "tree_comparacion_calibres"):
+            for item in self.tree_comparacion_calibres.get_children(""):
+                self.tree_comparacion_calibres.delete(item)
+        if hasattr(self, "resumen_calibrador_var"):
+            self.resumen_calibrador_var.set(
+                "Calibrador total partida: Podrido=- | DesLínea=- | DesMesa=- | Destrío total=- | ΣCAL0..CAL9=-"
+            )
+        if hasattr(self, "resumen_metricas_comparacion_var"):
+            self.resumen_metricas_comparacion_var.set(
+                "Métricas: error absoluto medio=- | error total absoluto=- | dominante IA=- | dominante real normalizado=-"
+            )
+        if hasattr(self, "nota_comparacion_var"):
+            self.nota_comparacion_var.set(
+                "Comparación realizada sobre distribución de calibres normalizada, excluyendo podrido y destrío."
+            )
+        self._comparacion_ia_vs_calibrador = {}
+
     @staticmethod
     def _confianza_a_float(value: Any) -> float | None:
         if isinstance(value, (int, float)):
@@ -1555,6 +1677,140 @@ class ObtencionCalibresWindow(BaseToolWindow):
             except ValueError:
                 return None
         return None
+
+    def _get_boleta_actual(self) -> str:
+        if self._current_muestra_id:
+            for muestra in self._muestras:
+                if muestra.get("id_muestra") == self._current_muestra_id:
+                    return str(muestra.get("boleta", "")).strip()
+        return self.boleta_var.get().strip()
+
+    def _get_distribucion_ia_consolidada(self) -> dict[str, float]:
+        resultados = self._get_estimacion_resultados_muestra_actual()
+        acumulado: dict[str, float] = {}
+        count = 0
+        for row in resultados.values():
+            if row.get("error") or row.get("apta_para_estimacion") != "Sí":
+                continue
+            distribucion = row.get("distribucion", [])
+            if not isinstance(distribucion, list):
+                continue
+            count += 1
+            for item in distribucion:
+                calibre = str(item.get("calibre", "")).strip().upper()
+                pct = self._confianza_a_float(item.get("porcentaje"))
+                if not calibre or pct is None:
+                    continue
+                acumulado[calibre] = acumulado.get(calibre, 0.0) + max(0.0, pct)
+        if count <= 0 or not acumulado:
+            return {}
+        promedio = {calibre: valor / count for calibre, valor in acumulado.items()}
+        total = sum(promedio.values())
+        if total <= 0:
+            return {}
+        return {calibre: (valor * 100.0 / total) for calibre, valor in promedio.items()}
+
+    def _leer_calibrador_boleta(self, boleta: str) -> dict[str, Any]:
+        conn = sqlite3.connect(DB_FRUTA_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        try:
+            sql = """
+            SELECT
+                COALESCE("%Podrido", 0) AS Podrido,
+                COALESCE("%DesLinea", 0) AS DesLinea,
+                COALESCE("%DesMesa", 0) AS DesMesa,
+                COALESCE("%Cal0", 0) AS Cal0,
+                COALESCE("%Cal1", 0) AS Cal1,
+                COALESCE("%Cal2", 0) AS Cal2,
+                COALESCE("%Cal3", 0) AS Cal3,
+                COALESCE("%Cal4", 0) AS Cal4,
+                COALESCE("%Cal5", 0) AS Cal5,
+                COALESCE("%Cal6", 0) AS Cal6,
+                COALESCE("%Cal7", 0) AS Cal7,
+                COALESCE("%Cal8", 0) AS Cal8,
+                COALESCE("%Cal9", 0) AS Cal9
+            FROM PesosFres
+            WHERE TRIM(COALESCE(Boleta, '')) = ?
+            ORDER BY Fcarga DESC
+            LIMIT 1
+            """
+            row = conn.execute(sql, (boleta,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise ValueError(f"No existe registro en PesosFres para boleta {boleta}.")
+
+        pod = self._confianza_a_float(row["Podrido"]) or 0.0
+        des_linea = self._confianza_a_float(row["DesLinea"]) or 0.0
+        des_mesa = self._confianza_a_float(row["DesMesa"]) or 0.0
+        calibres_brutos = {
+            f"CAL {idx}": self._confianza_a_float(row[f"Cal{idx}"]) or 0.0
+            for idx in range(10)
+        }
+        return {
+            "podrido": pod,
+            "des_linea": des_linea,
+            "des_mesa": des_mesa,
+            "destrio_total": des_linea + des_mesa,
+            "calibres_brutos": calibres_brutos,
+            "suma_calibres": sum(calibres_brutos.values()),
+        }
+
+    def _comparar_ia_vs_calibrador(self) -> None:
+        boleta = self._get_boleta_actual()
+        if not boleta:
+            messagebox.showinfo("Obtención calibres", "No hay boleta seleccionada para comparar.", parent=self)
+            return
+        distribucion_ia = self._get_distribucion_ia_consolidada()
+        if not distribucion_ia:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "No hay distribución IA apta para comparar. Ejecute 'Estimación calibres IA'.",
+                parent=self,
+            )
+            return
+        try:
+            calibrador = self._leer_calibrador_boleta(boleta)
+            real_normalizado = normalizar_distribucion_calibres(calibrador["calibres_brutos"])
+        except Exception as exc:  # noqa: BLE001
+            self._limpiar_resultados_comparacion_calibres()
+            self.nota_comparacion_var.set(str(exc))
+            messagebox.showerror("Obtención calibres", f"No se pudo comparar IA vs calibrador: {exc}", parent=self)
+            return
+
+        self._limpiar_resultados_comparacion_calibres()
+        comp = comparar_distribuciones(distribucion_ia, real_normalizado)
+        self._comparacion_ia_vs_calibrador = {"boleta": boleta, **comp}
+        self.resumen_calibrador_var.set(
+            "Calibrador total partida: "
+            f"Podrido={calibrador['podrido']:.2f}% | DesLínea={calibrador['des_linea']:.2f}% | "
+            f"DesMesa={calibrador['des_mesa']:.2f}% | Destrío total={calibrador['destrio_total']:.2f}% | "
+            f"ΣCAL0..CAL9={calibrador['suma_calibres']:.2f}%"
+        )
+        for calibre in CALIBRES_CALIBRADOR:
+            self.tree_comparacion_calibres.insert(
+                "",
+                "end",
+                values=(
+                    calibre,
+                    f"{distribucion_ia.get(calibre, 0.0):.2f}",
+                    f"{real_normalizado.get(calibre, 0.0):.2f}",
+                    f"{calibrador['calibres_brutos'].get(calibre, 0.0):.2f}",
+                    f"{abs(distribucion_ia.get(calibre, 0.0) - real_normalizado.get(calibre, 0.0)):.2f}",
+                ),
+            )
+        self.resumen_metricas_comparacion_var.set(
+            "Métricas: "
+            f"error absoluto medio={comp['error_abs_medio']:.2f} | "
+            f"error total absoluto={comp['error_total_abs']:.2f} | "
+            f"dominante IA={comp['calibre_dominante_ia']} | "
+            f"dominante real normalizado={comp['calibre_dominante_real']}"
+        )
+        self.nota_comparacion_var.set(
+            "Comparación realizada sobre distribución de calibres normalizada, excluyendo podrido y destrío."
+        )
 
     def _pintar_resultados_ia(self) -> None:
         self._limpiar_resultados_ia()
@@ -1614,6 +1870,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_usar_solo_aptas_ia,
             self.btn_estimacion_calibres_ia,
             self.btn_ver_detalle_estimacion_ia,
+            self.btn_comparar_calibrador,
             self.btn_preparar_analisis,
             self.btn_ejecutar_flujo,
         ):
