@@ -94,6 +94,21 @@ def comparar_distribuciones(
     }
 
 
+def clasificar_calidad_error(error_abs_medio: float) -> str:
+    """Clasifica la calidad de comparación usando error absoluto medio."""
+    try:
+        error = float(error_abs_medio)
+    except (TypeError, ValueError):
+        return "-"
+    if error <= 5.0:
+        return "BUENA"
+    if error <= 10.0:
+        return "ACEPTABLE"
+    if error <= 15.0:
+        return "MALA"
+    return "MUY_MALA"
+
+
 def _valor_a_float(value: Any, default: float = 0.0) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -484,6 +499,7 @@ class CalibresIAHistoryRepository:
         albaran: str = "",
         variedad: str = "",
         cultivo: str = "",
+        calidad: str = "",
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         filtros_sql: list[str] = []
@@ -500,6 +516,19 @@ class CalibresIAHistoryRepository:
         if cultivo.strip():
             filtros_sql.append("UPPER(COALESCE(cultivo, '')) LIKE UPPER(?)")
             params.append(f"%{cultivo.strip()}%")
+        calidad_limpia = calidad.strip().upper()
+        if calidad_limpia in {"BUENA", "ACEPTABLE", "MALA", "MUY_MALA"}:
+            filtros_sql.append(
+                """(
+                    CASE
+                        WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
+                        WHEN COALESCE(error_absoluto_medio, 999999) <= 10 THEN 'ACEPTABLE'
+                        WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
+                        ELSE 'MUY_MALA'
+                    END
+                ) = ?"""
+            )
+            params.append(calidad_limpia)
 
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
@@ -516,7 +545,13 @@ class CalibresIAHistoryRepository:
                 calibre_dominante_ia,
                 calibre_dominante_real,
                 error_absoluto_medio,
-                error_total_absoluto
+                error_total_absoluto,
+                CASE
+                    WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
+                    WHEN COALESCE(error_absoluto_medio, 999999) <= 10 THEN 'ACEPTABLE'
+                    WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
+                    ELSE 'MUY_MALA'
+                END AS calidad
             FROM comparaciones_calibres
             {where_sql}
             ORDER BY datetime(fecha_registro) DESC, id DESC
@@ -551,6 +586,7 @@ class CalibresIAHistoryRepository:
         albaran: str = "",
         variedad: str = "",
         cultivo: str = "",
+        calidad: str = "",
     ) -> dict[str, Any]:
         filtros_sql: list[str] = []
         params: list[Any] = []
@@ -566,12 +602,41 @@ class CalibresIAHistoryRepository:
         if cultivo.strip():
             filtros_sql.append("UPPER(COALESCE(cultivo, '')) LIKE UPPER(?)")
             params.append(f"%{cultivo.strip()}%")
+        calidad_limpia = calidad.strip().upper()
+        if calidad_limpia in {"BUENA", "ACEPTABLE", "MALA", "MUY_MALA"}:
+            filtros_sql.append(
+                """(
+                    CASE
+                        WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
+                        WHEN COALESCE(error_absoluto_medio, 999999) <= 10 THEN 'ACEPTABLE'
+                        WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
+                        ELSE 'MUY_MALA'
+                    END
+                ) = ?"""
+            )
+            params.append(calidad_limpia)
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql_base = f"""
             SELECT
                 COUNT(*) AS total_registros,
                 AVG(COALESCE(error_absoluto_medio, 0)) AS error_medio_global,
-                AVG(COALESCE(error_total_absoluto, 0)) AS error_total_medio
+                AVG(COALESCE(error_total_absoluto, 0)) AS error_total_medio,
+                SUM(CASE WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 1 ELSE 0 END) AS total_buena,
+                SUM(
+                    CASE
+                        WHEN COALESCE(error_absoluto_medio, 999999) > 5
+                        AND COALESCE(error_absoluto_medio, 999999) <= 10 THEN 1
+                        ELSE 0
+                    END
+                ) AS total_aceptable,
+                SUM(
+                    CASE
+                        WHEN COALESCE(error_absoluto_medio, 999999) > 10
+                        AND COALESCE(error_absoluto_medio, 999999) <= 15 THEN 1
+                        ELSE 0
+                    END
+                ) AS total_mala,
+                SUM(CASE WHEN COALESCE(error_absoluto_medio, 999999) > 15 THEN 1 ELSE 0 END) AS total_muy_mala
             FROM comparaciones_calibres
             {where_sql}
         """
@@ -605,6 +670,10 @@ class CalibresIAHistoryRepository:
             "error_total_medio": float(base["error_total_medio"] or 0.0),
             "dominante_ia_mas_frecuente": str((dom_ia["calibre_dominante_ia"] if dom_ia else "") or "-"),
             "dominante_real_mas_frecuente": str((dom_real["calibre_dominante_real"] if dom_real else "") or "-"),
+            "total_buena": int(base["total_buena"] or 0),
+            "total_aceptable": int(base["total_aceptable"] or 0),
+            "total_mala": int(base["total_mala"] or 0),
+            "total_muy_mala": int(base["total_muy_mala"] or 0),
         }
 
 
@@ -715,11 +784,13 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         self.albaran_var = tk.StringVar()
         self.variedad_var = tk.StringVar()
         self.cultivo_var = tk.StringVar()
+        self.calidad_var = tk.StringVar(value="TODAS")
         self.estado_var = tk.StringVar(value=f"Origen DB: {self.history_repo.db_path}")
         self.resumen_var = tk.StringVar(
             value=(
                 "Registros=0 | Error medio global=0.00 | Error total medio=0.00 | "
-                "Dominante IA frecuente=- | Dominante real frecuente=-"
+                "Dominante IA frecuente=- | Dominante real frecuente=- | "
+                "BUENA=0 | ACEPTABLE=0 | MALA=0 | MUY_MALA=0"
             )
         )
 
@@ -736,8 +807,8 @@ class CalibresIAHistoryWindow(tk.Toplevel):
 
         filtros = ttk.LabelFrame(container, text="Filtros", padding=8)
         filtros.grid(row=0, column=0, sticky="ew")
-        for col in range(8):
-            filtros.columnconfigure(col, weight=1 if col in {1, 3, 5, 7} else 0)
+        for col in range(10):
+            filtros.columnconfigure(col, weight=1 if col in {1, 3, 5, 7, 9} else 0)
 
         ttk.Label(filtros, text="Boleta:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
         ttk.Entry(filtros, textvariable=self.boleta_var).grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=2)
@@ -747,8 +818,16 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         ttk.Entry(filtros, textvariable=self.variedad_var).grid(row=0, column=5, sticky="ew", padx=(0, 10), pady=2)
         ttk.Label(filtros, text="Cultivo:").grid(row=0, column=6, sticky="w", padx=(0, 6), pady=2)
         ttk.Entry(filtros, textvariable=self.cultivo_var).grid(row=0, column=7, sticky="ew", padx=(0, 10), pady=2)
+        ttk.Label(filtros, text="Calidad:").grid(row=0, column=8, sticky="w", padx=(0, 6), pady=2)
+        ttk.Combobox(
+            filtros,
+            textvariable=self.calidad_var,
+            state="readonly",
+            values=("TODAS", "BUENA", "ACEPTABLE", "MALA", "MUY_MALA"),
+            width=14,
+        ).grid(row=0, column=9, sticky="ew", padx=(0, 10), pady=2)
         ttk.Button(filtros, text="Buscar histórico", command=self._buscar_historico).grid(
-            row=1, column=7, sticky="e", pady=(8, 0)
+            row=1, column=9, sticky="e", pady=(8, 0)
         )
 
         ttk.Label(container, textvariable=self.estado_var, foreground="#34495e").grid(row=1, column=0, sticky="ew", pady=(8, 3))
@@ -773,6 +852,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "calibre_dominante_real",
             "error_absoluto_medio",
             "error_total_absoluto",
+            "calidad",
         )
         self.tree_historial = ttk.Treeview(frame_tabla, columns=columns, show="headings")
         headers = {
@@ -787,6 +867,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "calibre_dominante_real": "Dominante real",
             "error_absoluto_medio": "Error abs. medio",
             "error_total_absoluto": "Error total abs.",
+            "calidad": "Calidad",
         }
         widths = {
             "fecha_registro": 160,
@@ -800,6 +881,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "calibre_dominante_real": 120,
             "error_absoluto_medio": 120,
             "error_total_absoluto": 120,
+            "calidad": 105,
         }
         for col in columns:
             self.tree_historial.heading(col, text=headers[col])
@@ -824,6 +906,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "albaran": self.albaran_var.get().strip(),
             "variedad": self.variedad_var.get().strip(),
             "cultivo": self.cultivo_var.get().strip(),
+            "calidad": "" if self.calidad_var.get() == "TODAS" else self.calidad_var.get().strip(),
         }
 
         def worker() -> None:
@@ -860,24 +943,31 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                     row.get("calibre_dominante_real", "-"),
                     self._fmt_number(row.get("error_absoluto_medio")),
                     self._fmt_number(row.get("error_total_absoluto")),
+                    row.get("calidad", clasificar_calidad_error(row.get("error_absoluto_medio"))),
                 ),
             )
         self.resumen_var.set(
             "Registros={numero_registros} | Error medio global={error_medio_global} | "
             "Error total medio={error_total_medio} | Dominante IA frecuente={dominante_ia_mas_frecuente} | "
-            "Dominante real frecuente={dominante_real_mas_frecuente}".format(
+            "Dominante real frecuente={dominante_real_mas_frecuente} | BUENA={total_buena} | "
+            "ACEPTABLE={total_aceptable} | MALA={total_mala} | MUY_MALA={total_muy_mala}".format(
                 numero_registros=summary.get("numero_registros", 0),
                 error_medio_global=self._fmt_number(summary.get("error_medio_global")),
                 error_total_medio=self._fmt_number(summary.get("error_total_medio")),
                 dominante_ia_mas_frecuente=summary.get("dominante_ia_mas_frecuente", "-"),
                 dominante_real_mas_frecuente=summary.get("dominante_real_mas_frecuente", "-"),
+                total_buena=summary.get("total_buena", 0),
+                total_aceptable=summary.get("total_aceptable", 0),
+                total_mala=summary.get("total_mala", 0),
+                total_muy_mala=summary.get("total_muy_mala", 0),
             )
         )
 
     def _on_busqueda_error(self, exc: Exception) -> None:
         self.estado_var.set(f"Error consultando histórico IA: {exc}")
         self.resumen_var.set(
-            "Registros=0 | Error medio global=- | Error total medio=- | Dominante IA frecuente=- | Dominante real frecuente=-"
+            "Registros=0 | Error medio global=- | Error total medio=- | Dominante IA frecuente=- | Dominante real frecuente=- | "
+            "BUENA=0 | ACEPTABLE=0 | MALA=0 | MUY_MALA=0"
         )
         messagebox.showerror("Histórico IA", f"No se pudo consultar la base histórica:\n{exc}", parent=self)
 
@@ -947,6 +1037,9 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             lineas.append(f"Real bruto CAL{idx}: {self._fmt_number(detail.get(f'real_bruto_cal{idx}'))}%")
         lineas.extend(
             [
+                "",
+                "=== Calidad comparación ===",
+                f"Calidad: {clasificar_calidad_error(detail.get('error_absoluto_medio'))}",
                 "",
                 f"podrido: {self._fmt_number(detail.get('podrido'))}",
                 f"deslinea: {self._fmt_number(detail.get('deslinea'))}",
