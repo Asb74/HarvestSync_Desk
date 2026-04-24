@@ -209,10 +209,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._overlay_paths_by_foto: dict[str, str] = {}
         self._frutos_resultados: dict[str, PhotoFruitAnalysisResult] = {}
         self._frutos_overlay_paths_by_foto: dict[str, str] = {}
+        self._ia_validacion_resultados_by_muestra: dict[str, dict[str, dict[str, Any]]] = {}
         self._overlay_dir = Path(tempfile.gettempdir()) / "harvestsync_desk" / "calibres_overlays"
         self._overlay_dir.mkdir(parents=True, exist_ok=True)
         self._fruit_analyzer = FruitCaliberAnalyzer()
         self._ai_validacion_en_curso = False
+        self._ai_lote_en_curso = False
 
         self._build_ui()
         self._cargar_configuracion()
@@ -287,15 +289,25 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         toolbar = ttk.Frame(frame_fotos)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        toolbar.columnconfigure(3, weight=1)
-        ttk.Button(toolbar, text="Seleccionar todas", command=self._seleccionar_todas).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(toolbar, text="Deseleccionar todas", command=self._deseleccionar_todas).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(toolbar, text="Invertir selección", command=self._invertir_seleccion).grid(row=0, column=2, padx=(0, 6))
-        ttk.Button(toolbar, text="🎯 Detectar patrón", command=self._detectar_patron_y_escala).grid(row=0, column=3, padx=(0, 6))
-        ttk.Button(toolbar, text="🍊 Analizar frutos", command=self._analizar_frutos).grid(row=0, column=4, padx=(0, 6))
+        toolbar.columnconfigure(6, weight=1)
+        self.btn_seleccionar_todas = ttk.Button(toolbar, text="Seleccionar todas", command=self._seleccionar_todas)
+        self.btn_seleccionar_todas.grid(row=0, column=0, padx=(0, 6))
+        self.btn_deseleccionar_todas = ttk.Button(toolbar, text="Deseleccionar todas", command=self._deseleccionar_todas)
+        self.btn_deseleccionar_todas.grid(row=0, column=1, padx=(0, 6))
+        self.btn_invertir_seleccion = ttk.Button(toolbar, text="Invertir selección", command=self._invertir_seleccion)
+        self.btn_invertir_seleccion.grid(row=0, column=2, padx=(0, 6))
+        self.btn_detectar_patron = ttk.Button(toolbar, text="🎯 Detectar patrón", command=self._detectar_patron_y_escala)
+        self.btn_detectar_patron.grid(row=0, column=3, padx=(0, 6))
+        self.btn_analizar_frutos = ttk.Button(toolbar, text="🍊 Analizar frutos", command=self._analizar_frutos)
+        self.btn_analizar_frutos.grid(row=0, column=4, padx=(0, 6))
         self.btn_validacion_ia = ttk.Button(toolbar, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
         self.btn_validacion_ia.grid(row=0, column=5, padx=(0, 6))
-        ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=6, sticky="e")
+        self.btn_validar_lote_ia = ttk.Button(toolbar, text="🤖 Validar lote IA", command=self._validar_lote_ia)
+        self.btn_validar_lote_ia.grid(row=0, column=6, padx=(0, 6))
+        self.btn_usar_solo_aptas_ia = ttk.Button(toolbar, text="✅ Usar solo aptas IA", command=self._usar_solo_aptas_ia)
+        self.btn_usar_solo_aptas_ia.grid(row=0, column=7, padx=(0, 6))
+        self.btn_preparar_analisis = ttk.Button(toolbar, text="🧮 Preparar análisis", command=self._preparar_analisis)
+        self.btn_preparar_analisis.grid(row=0, column=8, sticky="e")
 
         self.resumen_fotos_var = tk.StringVar(value="Fotos encontradas: 0 | Seleccionadas: 0 | Excluidas: 0")
         ttk.Label(frame_fotos, textvariable=self.resumen_fotos_var, foreground="#34495e").grid(row=1, column=0, sticky="w", pady=(0, 6))
@@ -369,6 +381,36 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.tree_frutos_foto.bind("<Double-1>", self._abrir_overlay_frutos_actual)
         ttk.Button(frutos, text="👁 Ver overlay frutos", command=self._abrir_overlay_frutos_actual).grid(row=1, column=0, sticky="e", pady=(6, 0))
 
+        ia_frame = ttk.LabelFrame(frame_fotos, text="6) Validación IA por lote", padding=6)
+        ia_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ia_frame.columnconfigure(0, weight=1)
+
+        self.tree_validacion_ia = ttk.Treeview(
+            ia_frame,
+            columns=("id_foto", "apta", "confianza", "oclusion", "patron_visible", "estado"),
+            show="headings",
+            height=4,
+        )
+        headers_ia = {
+            "id_foto": "Foto",
+            "apta": "IA apta",
+            "confianza": "Confianza",
+            "oclusion": "Oclusión",
+            "patron_visible": "Patrón visible",
+            "estado": "Estado/Error",
+        }
+        widths_ia = {"id_foto": 180, "apta": 80, "confianza": 85, "oclusion": 90, "patron_visible": 120, "estado": 420}
+        for col in headers_ia:
+            self.tree_validacion_ia.heading(col, text=headers_ia[col])
+            self.tree_validacion_ia.column(col, width=widths_ia[col], anchor="w")
+        self.tree_validacion_ia.grid(row=0, column=0, sticky="ew")
+        self.resumen_ia_lote_var = tk.StringVar(
+            value="IA lote: evaluadas=0 | aptas=0 | no aptas=0 | errores=0 | confianza media=-"
+        )
+        ttk.Label(ia_frame, textvariable=self.resumen_ia_lote_var, foreground="#34495e").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+
     def _sync_fotos_width(self, event: tk.Event) -> None:
         self.canvas_fotos.itemconfigure(self._fotos_window, width=event.width)
 
@@ -401,8 +443,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._overlay_paths_by_foto = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
+        self._ia_validacion_resultados_by_muestra = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
+        self._limpiar_resultados_ia()
 
         def worker() -> None:
             try:
@@ -484,6 +528,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._overlay_paths_by_foto = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
+        self._limpiar_resultados_ia()
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
         self._current_muestra_id = id_muestra
@@ -544,6 +589,19 @@ class ObtencionCalibresWindow(BaseToolWindow):
             ttk.Label(box, text=f"Ruta: {foto['ruta_local']}", wraplength=280).pack(anchor="w", pady=(2, 4))
             timestamp = foto.get("timestamp")
             ttk.Label(box, text=f"Timestamp: {timestamp if timestamp is not None else '-'}", wraplength=280, foreground="#4a4a4a").pack(anchor="w", pady=(0, 4))
+            ia_resultado = self._get_ia_resultado_foto(id_foto)
+            if ia_resultado:
+                texto_ia = (
+                    f"IA apta: {ia_resultado.get('apta', '-')}"
+                    f" | Conf: {ia_resultado.get('confianza', '-')}"
+                    f" | Oclusión: {ia_resultado.get('oclusion', '-')}"
+                    f" | Patrón: {ia_resultado.get('patron_visible', '-')}"
+                )
+                ttk.Label(box, text=texto_ia, wraplength=280, foreground="#1f618d").pack(anchor="w", pady=(0, 4))
+                estado_ia = str(ia_resultado.get("estado", "") or "").strip()
+                if estado_ia:
+                    color_estado = "#b00020" if ia_resultado.get("error") else "#1d8348"
+                    ttk.Label(box, text=f"Estado IA: {estado_ia}", wraplength=280, foreground=color_estado).pack(anchor="w", pady=(0, 4))
 
             if card["error"]:
                 ttk.Label(box, text=f"Error descarga: {card['error']}", foreground="#b00020", wraplength=280).pack(anchor="w")
@@ -566,6 +624,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             ttk.Label(box, text=card["url"], wraplength=280, foreground="#1b4f72").pack(anchor="w", pady=(4, 0))
 
         self._actualizar_resumen_fotos()
+        self._pintar_resultados_ia()
         self.estado_var.set(f"Fotos cargadas: {len(cards)}")
 
     def _create_thumbnail(self, raw: bytes | None) -> Any | None:
@@ -920,6 +979,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
     def _ejecutar_validacion_ia(self) -> None:
         if self._ai_validacion_en_curso:
             return
+        if self._ai_lote_en_curso:
+            return
         if not self._current_muestra_id:
             messagebox.showinfo("Obtención calibres", "Seleccione una muestra para ejecutar Validación IA.", parent=self)
             return
@@ -1044,6 +1105,20 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._ai_validacion_en_curso = False
         self.btn_validacion_ia.config(state="normal")
         self.estado_var.set(f"Validación IA completada para {id_foto}.")
+        parsed = self._parse_validacion_ia_result(result)
+        resultados = self._get_ia_resultados_muestra_actual()
+        resultados[id_foto] = {
+            "apta": parsed.get("apta", "-"),
+            "confianza": parsed.get("confianza", "-"),
+            "oclusion": parsed.get("oclusion", "-"),
+            "patron_visible": parsed.get("patron_visible", "-"),
+            "estado": "OK",
+            "error": False,
+            "image_url": image_ref,
+            "raw_result": result,
+            "parsed": parsed,
+        }
+        self._pintar_resultados_ia()
         self._mostrar_resultado_ia(id_foto=id_foto, image_ref=image_ref, result=result)
 
     def _on_validacion_ia_error(self, error_message: str) -> None:
@@ -1110,6 +1185,247 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "output_text_original": output_text,
             "json_parseado": parsed_output,
         }
+
+    def _get_ia_resultados_muestra_actual(self) -> dict[str, dict[str, Any]]:
+        if not self._current_muestra_id:
+            return {}
+        return self._ia_validacion_resultados_by_muestra.setdefault(self._current_muestra_id, {})
+
+    def _get_ia_resultado_foto(self, id_foto: str) -> dict[str, Any] | None:
+        if not self._current_muestra_id:
+            return None
+        return self._ia_validacion_resultados_by_muestra.get(self._current_muestra_id, {}).get(id_foto)
+
+    def _limpiar_resultados_ia(self) -> None:
+        if hasattr(self, "tree_validacion_ia"):
+            for item in self.tree_validacion_ia.get_children(""):
+                self.tree_validacion_ia.delete(item)
+        if hasattr(self, "resumen_ia_lote_var"):
+            self.resumen_ia_lote_var.set("IA lote: evaluadas=0 | aptas=0 | no aptas=0 | errores=0 | confianza media=-")
+
+    @staticmethod
+    def _confianza_a_float(value: Any) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            limpio = value.strip().replace("%", "").replace(",", ".")
+            try:
+                return float(limpio)
+            except ValueError:
+                return None
+        return None
+
+    def _pintar_resultados_ia(self) -> None:
+        self._limpiar_resultados_ia()
+        resultados = self._get_ia_resultados_muestra_actual()
+        if not resultados:
+            return
+
+        aptas = 0
+        no_aptas = 0
+        errores = 0
+        conf_values: list[float] = []
+
+        for id_foto in sorted(resultados.keys()):
+            row = resultados[id_foto]
+            if row.get("error"):
+                errores += 1
+            elif row.get("apta") == "Sí":
+                aptas += 1
+            else:
+                no_aptas += 1
+
+            conf = self._confianza_a_float(row.get("confianza"))
+            if conf is not None:
+                conf_values.append(conf)
+
+            self.tree_validacion_ia.insert(
+                "",
+                "end",
+                iid=id_foto,
+                values=(
+                    id_foto,
+                    row.get("apta", "-"),
+                    row.get("confianza", "-"),
+                    row.get("oclusion", "-"),
+                    row.get("patron_visible", "-"),
+                    row.get("estado", "-"),
+                ),
+            )
+
+        total = len(resultados)
+        confianza_media = f"{(sum(conf_values) / len(conf_values)):.2f}" if conf_values else "-"
+        self.resumen_ia_lote_var.set(
+            f"IA lote: evaluadas={total} | aptas={aptas} | no aptas={no_aptas} | errores={errores} | confianza media={confianza_media}"
+        )
+
+    def _set_controles_lote_ia_habilitados(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for btn in (
+            self.btn_seleccionar_todas,
+            self.btn_deseleccionar_todas,
+            self.btn_invertir_seleccion,
+            self.btn_detectar_patron,
+            self.btn_analizar_frutos,
+            self.btn_validacion_ia,
+            self.btn_validar_lote_ia,
+            self.btn_usar_solo_aptas_ia,
+            self.btn_preparar_analisis,
+        ):
+            btn.config(state=state)
+
+    def _validar_lote_ia(self) -> None:
+        if self._ai_lote_en_curso:
+            return
+        if not self._current_muestra_id:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para validar lote IA.", parent=self)
+            return
+
+        ids_seleccionadas = sorted(self._selected_fotos_by_muestra.get(self._current_muestra_id, set()))
+        if not ids_seleccionadas:
+            messagebox.showwarning("Obtención calibres", "No hay fotos marcadas en 'Usar en análisis'.", parent=self)
+            return
+
+        cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+        service_url, source, resolve_error = self.data_service.resolve_url_servicio_ia()
+        if not service_url:
+            messagebox.showerror(
+                "Obtención calibres",
+                (
+                    "No hay URL de servicio IA.\n"
+                    "Orden de resolución: HARVESTSYNC_INTERNAL_AI_URL -> ServidorIA/url_actual/url.\n"
+                    f"Detalle: {resolve_error or 'No hay configuración disponible.'}"
+                ),
+                parent=self,
+            )
+            return
+
+        LOGGER.info("Validación IA lote: inicio. muestra=%s fotos=%s source=%s", self._current_muestra_id, len(ids_seleccionadas), source)
+        timeout_seconds = 25
+        self._ai_lote_en_curso = True
+        self._set_controles_lote_ia_habilitados(False)
+        self.estado_var.set(f"Validando IA 0/{len(ids_seleccionadas)}...")
+        resultados_lote = self._get_ia_resultados_muestra_actual()
+
+        def worker() -> None:
+            batch_t0 = time.perf_counter()
+            for idx, id_foto in enumerate(ids_seleccionadas, start=1):
+                foto_t0 = time.perf_counter()
+                LOGGER.info("Validación IA lote: foto %s/%s id_foto=%s", idx, len(ids_seleccionadas), id_foto)
+                row: dict[str, Any] = {
+                    "apta": "-",
+                    "confianza": "-",
+                    "oclusion": "-",
+                    "patron_visible": "-",
+                    "estado": "",
+                    "error": True,
+                    "image_url": "",
+                }
+                try:
+                    card = cards_by_id.get(id_foto)
+                    if not card:
+                        raise ValueError("La foto no está cargada en memoria para procesar.")
+                    ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+                    if not ruta_local:
+                        raise ValueError("No existe 'ruta_local' en la foto.")
+                    image_url_for_ai = self._build_image_url_for_ai(ruta_local)
+                    if not image_url_for_ai:
+                        raise ValueError("No se pudo construir image_url HTTP para la foto.")
+                    row["image_url"] = image_url_for_ai
+                    result = call_analyze_image(
+                        server_url=service_url,
+                        image_url=image_url_for_ai,
+                        task="validacion_foto",
+                        context=(
+                            "Evaluar utilidad de imagen para calibres: "
+                            "visibilidad general, oclusión, nitidez y presencia/claridad del patrón."
+                        ),
+                        timeout_seconds=timeout_seconds,
+                    )
+                    parsed = self._parse_validacion_ia_result(result)
+                    row.update(
+                        {
+                            "apta": parsed.get("apta", "-"),
+                            "confianza": parsed.get("confianza", "-"),
+                            "oclusion": parsed.get("oclusion", "-"),
+                            "patron_visible": parsed.get("patron_visible", "-"),
+                            "estado": "OK",
+                            "error": False,
+                            "raw_result": result,
+                            "parsed": parsed,
+                        }
+                    )
+                    LOGGER.info(
+                        "Validación IA lote: resultado OK id_foto=%s apta=%s confianza=%s",
+                        id_foto,
+                        row["apta"],
+                        row["confianza"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    row["estado"] = str(exc)
+                    row["error"] = True
+                    LOGGER.error("Validación IA lote: error id_foto=%s error=%s", id_foto, exc)
+                finally:
+                    row["duracion_s"] = time.perf_counter() - foto_t0
+                    resultados_lote[id_foto] = row
+                    self.after(0, lambda i=idx: self.estado_var.set(f"Validando IA {i}/{len(ids_seleccionadas)}..."))
+                    self.after(0, self._pintar_resultados_ia)
+
+            total_elapsed = time.perf_counter() - batch_t0
+            LOGGER.info("Validación IA lote: fin. muestra=%s duracion=%.2fs", self._current_muestra_id, total_elapsed)
+            self.after(0, lambda elapsed=total_elapsed: self._on_lote_ia_finalizado(elapsed))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_lote_ia_finalizado(self, elapsed: float) -> None:
+        self._ai_lote_en_curso = False
+        self._set_controles_lote_ia_habilitados(True)
+        self._pintar_resultados_ia()
+        self._render_cards(self._current_cards)
+
+        resultados = self._get_ia_resultados_muestra_actual()
+        aptas = sum(1 for row in resultados.values() if not row.get("error") and row.get("apta") == "Sí")
+        errores = sum(1 for row in resultados.values() if row.get("error"))
+        no_aptas = max(len(resultados) - aptas - errores, 0)
+        conf_values = [self._confianza_a_float(row.get("confianza")) for row in resultados.values()]
+        conf_validas = [item for item in conf_values if item is not None]
+        conf_media = f"{(sum(conf_validas) / len(conf_validas)):.2f}" if conf_validas else "-"
+        self.estado_var.set(f"Validación IA lote finalizada: {len(resultados)} foto(s) en {elapsed:.1f}s.")
+        messagebox.showinfo(
+            "Obtención calibres - Validación IA por lote",
+            (
+                "Resumen validación IA por lote\n\n"
+                f"Fotos evaluadas: {len(resultados)}\n"
+                f"Aptas: {aptas}\n"
+                f"No aptas: {no_aptas}\n"
+                f"Errores: {errores}\n"
+                f"Confianza media: {conf_media}\n"
+                f"Duración total: {elapsed:.1f}s"
+            ),
+            parent=self,
+        )
+
+    def _usar_solo_aptas_ia(self) -> None:
+        if self._ai_lote_en_curso:
+            return
+        if not self._current_muestra_id:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra.", parent=self)
+            return
+
+        resultados = self._get_ia_resultados_muestra_actual()
+        if not resultados:
+            messagebox.showinfo("Obtención calibres", "No hay resultados IA por lote para aplicar.", parent=self)
+            return
+
+        actuales = self._selected_fotos_by_muestra.get(self._current_muestra_id, set())
+        nuevas = {
+            id_foto
+            for id_foto in actuales
+            if resultados.get(id_foto) and not resultados[id_foto].get("error") and resultados[id_foto].get("apta") == "Sí"
+        }
+        self._selected_fotos_by_muestra[self._current_muestra_id] = nuevas
+        self._render_cards(self._current_cards)
+        self.estado_var.set(f"Filtro IA aplicado: {len(nuevas)} foto(s) aptas seleccionadas.")
 
     def _mostrar_resultado_ia(self, id_foto: str, image_ref: str, result: dict[str, Any]) -> None:
         win = tk.Toplevel(self)
@@ -1213,7 +1529,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._deteccion_resultados.pop(id_foto, None)
         self._frutos_resultados.pop(id_foto, None)
         self._frutos_overlay_paths_by_foto.pop(id_foto, None)
+        self._ia_validacion_resultados_by_muestra.setdefault(self._current_muestra_id, {}).pop(id_foto, None)
         self._pintar_resultados_frutos()
+        self._pintar_resultados_ia()
         self._actualizar_resumen_fotos()
 
     def _actualizar_resumen_fotos(self) -> None:
@@ -1237,8 +1555,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._deteccion_resultados = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
+        self._ia_validacion_resultados_by_muestra[self._current_muestra_id] = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
+        self._limpiar_resultados_ia()
         self._render_cards(self._current_cards)
 
     def _deseleccionar_todas(self) -> None:
@@ -1248,8 +1568,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._deteccion_resultados = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
+        self._ia_validacion_resultados_by_muestra[self._current_muestra_id] = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
+        self._limpiar_resultados_ia()
         self._render_cards(self._current_cards)
 
     def _invertir_seleccion(self) -> None:
@@ -1262,8 +1584,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._deteccion_resultados = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
+        self._ia_validacion_resultados_by_muestra[self._current_muestra_id] = {}
         self._limpiar_resultados_deteccion()
         self._limpiar_resultados_frutos()
+        self._limpiar_resultados_ia()
         self._render_cards(self._current_cards)
 
     def _abrir_vista_ampliada(self, card: dict[str, Any]) -> None:
