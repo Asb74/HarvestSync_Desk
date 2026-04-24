@@ -215,6 +215,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._fruit_analyzer = FruitCaliberAnalyzer()
         self._ai_validacion_en_curso = False
         self._ai_lote_en_curso = False
+        self._flujo_recomendado_en_curso = False
 
         self._build_ui()
         self._cargar_configuracion()
@@ -473,12 +474,32 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ttk.Label(resumen_frame, text="Estado IA lote:", font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="nw", padx=(0, 8))
         ttk.Label(resumen_frame, textvariable=self.resumen_ia_lote_var, wraplength=920, justify="left").grid(row=1, column=1, sticky="w")
 
-        ttk.Button(tab_resumen, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(
-            row=1,
-            column=0,
-            sticky="e",
-            pady=(10, 0),
+        estado_fases_frame = ttk.LabelFrame(tab_resumen, text="Estado operativo por fases", padding=8)
+        estado_fases_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        estado_fases_frame.columnconfigure(0, weight=1)
+        self.resumen_fases_var = tk.StringVar(
+            value=(
+                "1. Selección: 0/0 fotos\n"
+                "2. IA: pendiente\n"
+                "3. Patrón: pendiente\n"
+                "4. Frutos: pendiente\n"
+                "5. Preparación: pendiente\n"
+                "Estado final: pendiente"
+            )
         )
+        ttk.Label(estado_fases_frame, textvariable=self.resumen_fases_var, justify="left", foreground="#34495e").grid(
+            row=0, column=0, sticky="w"
+        )
+
+        acciones_resumen = ttk.Frame(tab_resumen)
+        acciones_resumen.grid(row=2, column=0, sticky="e", pady=(10, 0))
+        self.btn_ejecutar_flujo = ttk.Button(
+            acciones_resumen,
+            text="▶ Ejecutar flujo recomendado",
+            command=self._ejecutar_flujo_recomendado,
+        )
+        self.btn_ejecutar_flujo.grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(acciones_resumen, text="🧮 Preparar análisis", command=self._preparar_analisis).grid(row=0, column=1, sticky="e")
 
         self.btn_preparar_analisis = ttk.Button(tab_muestras_fotos, text="🧮 Preparar análisis", command=self._preparar_analisis)
         self.btn_preparar_analisis.grid(row=2, column=1, sticky="e", pady=(8, 0))
@@ -598,6 +619,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
     def _render_fotos_muestra(self, id_muestra: str) -> None:
         self._limpiar_fotos()
+        self._analysis_payload = {}
         self._deteccion_resultados = {}
         self._overlay_paths_by_foto = {}
         self._frutos_resultados = {}
@@ -969,17 +991,19 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return
         self._abrir_vista_ampliada_desde_archivo(path, id_foto)
 
-    def _preparar_analisis(self) -> None:
+    def _preparar_analisis_interno(self, show_message: bool) -> tuple[bool, str]:
         selected = self.tree_muestras.selection()
         if not selected:
-            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para preparar análisis.", parent=self)
-            return
+            if show_message:
+                messagebox.showinfo("Obtención calibres", "Seleccione una muestra para preparar análisis.", parent=self)
+            return False, "Sin muestra seleccionada."
 
         id_muestra = selected[0]
         muestra = next((item for item in self._muestras if item["id_muestra"] == id_muestra), None)
         if not muestra:
-            messagebox.showerror("Obtención calibres", "No se encontró la muestra seleccionada.", parent=self)
-            return
+            if show_message:
+                messagebox.showerror("Obtención calibres", "No se encontró la muestra seleccionada.", parent=self)
+            return False, "No se encontró la muestra seleccionada."
 
         cultivo = str(muestra.get("cultivo", "")).strip()
         rangos = []
@@ -990,15 +1014,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
         fotos_seleccionadas = [foto for foto in fotos_muestra if str(foto.get("id_foto", "")) in ids_seleccionadas]
 
         if not fotos_seleccionadas:
-            messagebox.showwarning(
-                "Obtención calibres",
-                "No hay fotos seleccionadas para el análisis. Seleccione al menos una foto.",
-                parent=self,
-            )
-            return
-
-        if not self._deteccion_resultados:
-            self._detectar_patron_y_escala()
+            if show_message:
+                messagebox.showwarning(
+                    "Obtención calibres",
+                    "No hay fotos seleccionadas para el análisis. Seleccione al menos una foto.",
+                    parent=self,
+                )
+            return False, "No hay fotos seleccionadas para preparar análisis."
 
         resultados = {k: v for k, v in self._deteccion_resultados.items() if k in ids_seleccionadas}
         fotos_validas = [
@@ -1008,12 +1030,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ]
 
         if not fotos_validas:
-            messagebox.showwarning(
-                "Obtención calibres",
-                "Ninguna foto seleccionada pasó la detección del patrón. Ajuste selección o condiciones de captura.",
-                parent=self,
-            )
-            return
+            if show_message:
+                messagebox.showwarning(
+                    "Obtención calibres",
+                    "Ninguna foto seleccionada pasó la detección del patrón. Ajuste selección o condiciones de captura.",
+                    parent=self,
+                )
+            return False, "No hay fotos con patrón válido para preparar análisis."
 
         self._analysis_payload = {
             "id_muestra": id_muestra,
@@ -1034,19 +1057,24 @@ class ObtencionCalibresWindow(BaseToolWindow):
         }
 
         invalidas = len(resultados) - len(fotos_validas)
-        messagebox.showinfo(
-            "Obtención calibres",
-            (
-                "Preparación lista para análisis de calibres.\n\n"
-                f"Muestra: {id_muestra}\n"
-                f"Cultivo: {cultivo or '-'}\n"
-                f"Fotos válidas: {len(self._analysis_payload['fotos'])}\n"
-                f"Fotos inválidas: {invalidas}\n"
-                f"Diámetro patrón: {self._analysis_payload['diametro_patron_mm']:.2f} mm\n"
-                f"Rangos configurados: {len(rangos)}"
-            ),
-            parent=self,
-        )
+        if show_message:
+            messagebox.showinfo(
+                "Obtención calibres",
+                (
+                    "Preparación lista para análisis de calibres.\n\n"
+                    f"Muestra: {id_muestra}\n"
+                    f"Cultivo: {cultivo or '-'}\n"
+                    f"Fotos válidas: {len(self._analysis_payload['fotos'])}\n"
+                    f"Fotos inválidas: {invalidas}\n"
+                    f"Diámetro patrón: {self._analysis_payload['diametro_patron_mm']:.2f} mm\n"
+                    f"Rangos configurados: {len(rangos)}"
+                ),
+                parent=self,
+            )
+        return True, "Preparación completada."
+
+    def _preparar_analisis(self) -> None:
+        self._preparar_analisis_interno(show_message=True)
 
     def get_analysis_payload(self) -> dict[str, Any]:
         """Expone el payload armado para la siguiente etapa (cálculo de calibres)."""
@@ -1349,8 +1377,248 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_validar_lote_ia,
             self.btn_usar_solo_aptas_ia,
             self.btn_preparar_analisis,
+            self.btn_ejecutar_flujo,
         ):
             btn.config(state=state)
+
+    def _set_estado_paso_flujo(self, step_number: int, total_steps: int, text: str) -> None:
+        self.estado_var.set(f"Paso {step_number}/{total_steps}: {text}")
+
+    def _tiene_validacion_ia_completa(self, ids_foto: set[str]) -> bool:
+        if not ids_foto:
+            return False
+        resultados = self._get_ia_resultados_muestra_actual()
+        for id_foto in ids_foto:
+            row = resultados.get(id_foto)
+            if not row or row.get("error"):
+                return False
+            if row.get("apta") not in ("Sí", "No"):
+                return False
+        return True
+
+    def _tiene_patron_valido_completo(self, ids_foto: set[str]) -> bool:
+        if not ids_foto:
+            return False
+        return all(
+            self._deteccion_resultados.get(id_foto) and self._deteccion_resultados[id_foto].valid_for_next_step
+            for id_foto in ids_foto
+        )
+
+    def _tiene_analisis_frutos_completo(self, ids_foto: set[str]) -> bool:
+        if not ids_foto:
+            return False
+        return all(self._frutos_resultados.get(id_foto) is not None for id_foto in ids_foto)
+
+    def _ejecutar_flujo_recomendado(self) -> None:
+        if self._flujo_recomendado_en_curso or self._ai_lote_en_curso or self._ai_validacion_en_curso:
+            return
+        if not self._current_muestra_id:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para ejecutar el flujo recomendado.", parent=self)
+            return
+
+        ids_seleccionadas = set(self._selected_fotos_by_muestra.get(self._current_muestra_id, set()))
+        if not ids_seleccionadas:
+            messagebox.showwarning("Obtención calibres", "Faltan fotos seleccionadas para iniciar el flujo.", parent=self)
+            return
+
+        cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+        if any(id_foto not in cards_by_id for id_foto in ids_seleccionadas):
+            messagebox.showwarning("Obtención calibres", "Hay fotos seleccionadas sin descargar. Recargue la muestra.", parent=self)
+            return
+        if self._detector is None:
+            messagebox.showerror("Obtención calibres", "No hay configuración cargada para detección de patrón.", parent=self)
+            return
+
+        service_url, source, resolve_error = self.data_service.resolve_url_servicio_ia()
+        if not service_url and not self._tiene_validacion_ia_completa(ids_seleccionadas):
+            messagebox.showerror(
+                "Obtención calibres",
+                (
+                    "No hay URL de servicio IA para ejecutar validación de lote.\n"
+                    "Orden de resolución: HARVESTSYNC_INTERNAL_AI_URL -> ServidorIA/url_actual/url.\n"
+                    f"Detalle: {resolve_error or 'No hay configuración disponible.'}"
+                ),
+                parent=self,
+            )
+            return
+        LOGGER.info("Flujo recomendado: inicio muestra=%s source_ia=%s", self._current_muestra_id, source)
+
+        self._flujo_recomendado_en_curso = True
+        self._set_controles_lote_ia_habilitados(False)
+        total_steps = 5
+
+        def worker() -> None:
+            try:
+                id_muestra = self._current_muestra_id or ""
+                selected_ids = set(self._selected_fotos_by_muestra.get(id_muestra, set()))
+                if not self._tiene_validacion_ia_completa(selected_ids):
+                    self.after(0, lambda: self._set_estado_paso_flujo(1, total_steps, "Validando IA por lote..."))
+                    resultados_ia = self._get_ia_resultados_muestra_actual()
+                    for id_foto in sorted(selected_ids):
+                        card = cards_by_id.get(id_foto)
+                        if not card:
+                            continue
+                        ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+                        image_url_for_ai = self._build_image_url_for_ai(ruta_local)
+                        row: dict[str, Any] = {
+                            "apta": "-",
+                            "confianza": "-",
+                            "oclusion": "-",
+                            "patron_visible": "-",
+                            "estado": "",
+                            "error": True,
+                            "image_url": image_url_for_ai,
+                        }
+                        try:
+                            result = call_analyze_image(
+                                server_url=service_url,
+                                image_url=image_url_for_ai,
+                                task="validacion_foto",
+                                context=(
+                                    "Evaluar utilidad de imagen para calibres: "
+                                    "visibilidad general, oclusión, nitidez y presencia/claridad del patrón."
+                                ),
+                                timeout_seconds=25,
+                            )
+                            parsed = self._parse_validacion_ia_result(result)
+                            row.update(
+                                {
+                                    "apta": parsed.get("apta", "-"),
+                                    "confianza": parsed.get("confianza", "-"),
+                                    "oclusion": parsed.get("oclusion", "-"),
+                                    "patron_visible": parsed.get("patron_visible", "-"),
+                                    "estado": "OK",
+                                    "error": False,
+                                    "raw_result": result,
+                                    "parsed": parsed,
+                                }
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            row["estado"] = str(exc)
+                            row["error"] = True
+                        resultados_ia[id_foto] = row
+                else:
+                    self.after(0, lambda: self._set_estado_paso_flujo(1, total_steps, "Validación IA ya disponible, se omite."))
+
+                self.after(0, self._pintar_resultados_ia)
+
+                self.after(0, lambda: self._set_estado_paso_flujo(2, total_steps, "Aplicando fotos aptas IA..."))
+                resultados_ia = self._get_ia_resultados_muestra_actual()
+                aptas_ids = {
+                    id_foto
+                    for id_foto in selected_ids
+                    if resultados_ia.get(id_foto) and not resultados_ia[id_foto].get("error") and resultados_ia[id_foto].get("apta") == "Sí"
+                }
+                if not aptas_ids:
+                    self.after(
+                        0,
+                        lambda: self._on_flujo_recomendado_error(
+                            "La validación IA no dejó fotos aptas. Ajuste capturas o revise el lote."
+                        ),
+                    )
+                    return
+                self._selected_fotos_by_muestra[id_muestra] = aptas_ids
+                selected_ids = set(aptas_ids)
+
+                if not self._tiene_patron_valido_completo(selected_ids):
+                    self.after(0, lambda: self._set_estado_paso_flujo(3, total_steps, "Detectando patrón..."))
+                    resultados_patron: dict[str, CircleDetectionResult] = {}
+                    overlays_patron: dict[str, str] = {}
+                    for id_foto in sorted(selected_ids):
+                        card = cards_by_id.get(id_foto)
+                        if not card:
+                            continue
+                        result = self._detector.detect_from_bytes(id_foto, card.get("raw") or b"")
+                        resultados_patron[id_foto] = result
+                        overlay_path = self._save_overlay_image(id_foto, card.get("raw") or b"", result)
+                        if overlay_path:
+                            overlays_patron[id_foto] = overlay_path
+                    self._deteccion_resultados = resultados_patron
+                    self._overlay_paths_by_foto = overlays_patron
+                else:
+                    self.after(0, lambda: self._set_estado_paso_flujo(3, total_steps, "Patrón ya detectado, se omite."))
+
+                patrones_validos = [
+                    id_foto
+                    for id_foto in selected_ids
+                    if self._deteccion_resultados.get(id_foto) and self._deteccion_resultados[id_foto].valid_for_next_step
+                ]
+                if not patrones_validos:
+                    self.after(
+                        0,
+                        lambda: self._on_flujo_recomendado_error(
+                            "No hay patrón válido en las fotos aptas. Deteniendo flujo recomendado."
+                        ),
+                    )
+                    return
+
+                if not self._tiene_analisis_frutos_completo(selected_ids):
+                    self.after(0, lambda: self._set_estado_paso_flujo(4, total_steps, "Analizando frutos..."))
+                    muestra = next((item for item in self._muestras if item["id_muestra"] == id_muestra), None)
+                    cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
+                    rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
+                    resultados_frutos: dict[str, PhotoFruitAnalysisResult] = {}
+                    overlays_frutos: dict[str, str] = {}
+                    for id_foto in sorted(selected_ids):
+                        escala = self._deteccion_resultados.get(id_foto)
+                        card = cards_by_id.get(id_foto)
+                        if not escala or not escala.valid_for_next_step or escala.mm_per_pixel is None or not card:
+                            continue
+                        result = self._fruit_analyzer.analyze_photo(
+                            image_id=id_foto,
+                            raw_image=card.get("raw") or b"",
+                            mm_per_pixel=escala.mm_per_pixel,
+                            caliber_ranges=rangos,
+                        )
+                        resultados_frutos[id_foto] = result
+                        overlay = self._save_fruit_overlay_image(id_foto, card.get("raw") or b"", result)
+                        if overlay:
+                            overlays_frutos[id_foto] = overlay
+                    self._frutos_resultados = resultados_frutos
+                    self._frutos_overlay_paths_by_foto = overlays_frutos
+                else:
+                    self.after(0, lambda: self._set_estado_paso_flujo(4, total_steps, "Análisis de frutos ya disponible, se omite."))
+
+                self.after(0, lambda: self._set_estado_paso_flujo(5, total_steps, "Preparando análisis final..."))
+                self.after(0, self._pintar_resultados_deteccion)
+                self.after(0, self._pintar_resultados_frutos)
+                self.after(0, self._render_cards, self._current_cards)
+                self.after(0, self._finalizar_flujo_recomendado)
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda error=exc: self._on_flujo_recomendado_error(f"Error en flujo recomendado: {error}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finalizar_flujo_recomendado(self) -> None:
+        ok, detalle = self._preparar_analisis_interno(show_message=False)
+        self._flujo_recomendado_en_curso = False
+        self._set_controles_lote_ia_habilitados(True)
+        self._actualizar_resumen_global()
+        if not ok:
+            messagebox.showwarning("Obtención calibres", detalle, parent=self)
+            return
+        frutos_validos = 0
+        seleccionadas = self._selected_fotos_by_muestra.get(self._current_muestra_id or "", set())
+        for id_foto in seleccionadas:
+            res = self._frutos_resultados.get(id_foto)
+            if res:
+                frutos_validos += len([item for item in res.fruits if item.valid])
+        if frutos_validos == 0:
+            messagebox.showwarning(
+                "Obtención calibres",
+                "Flujo completado, pero no se detectaron frutos válidos. Revise captura o parámetros operativos.",
+                parent=self,
+            )
+        else:
+            messagebox.showinfo("Obtención calibres", "Flujo recomendado completado correctamente.", parent=self)
+        self.estado_var.set("Flujo recomendado finalizado.")
+
+    def _on_flujo_recomendado_error(self, mensaje: str) -> None:
+        self._flujo_recomendado_en_curso = False
+        self._set_controles_lote_ia_habilitados(True)
+        self._actualizar_resumen_global()
+        self.estado_var.set("Flujo recomendado detenido.")
+        messagebox.showwarning("Obtención calibres", mensaje, parent=self)
 
     def _validar_lote_ia(self) -> None:
         if self._ai_lote_en_curso:
@@ -1502,6 +1770,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             if resultados.get(id_foto) and not resultados[id_foto].get("error") and resultados[id_foto].get("apta") == "Sí"
         }
         self._selected_fotos_by_muestra[self._current_muestra_id] = nuevas
+        self._analysis_payload = {}
         self._render_cards(self._current_cards)
         self.estado_var.set(f"Filtro IA aplicado: {len(nuevas)} foto(s) aptas seleccionadas.")
 
@@ -1604,6 +1873,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             seleccionadas.add(id_foto)
         else:
             seleccionadas.discard(id_foto)
+        self._analysis_payload = {}
         self._deteccion_resultados.pop(id_foto, None)
         self._frutos_resultados.pop(id_foto, None)
         self._frutos_overlay_paths_by_foto.pop(id_foto, None)
@@ -1619,6 +1889,15 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.resumen_global_var.set(
                 "Fotos encontradas: 0 | Fotos seleccionadas: 0 | Fotos aptas IA: 0 | Fotos patrón válido: 0 | Frutos válidos: 0"
             )
+            if hasattr(self, "resumen_fases_var"):
+                self.resumen_fases_var.set(
+                    "1. Selección: 0/0 fotos\n"
+                    "2. IA: pendiente\n"
+                    "3. Patrón: pendiente\n"
+                    "4. Frutos: pendiente\n"
+                    "5. Preparación: pendiente\n"
+                    "Estado final: pendiente"
+                )
             return
         total_fotos = len(self._fotos_by_muestra.get(self._current_muestra_id, []))
         seleccionadas = self._selected_fotos_by_muestra.get(self._current_muestra_id, set())
@@ -1635,15 +1914,35 @@ class ObtencionCalibresWindow(BaseToolWindow):
             if self._deteccion_resultados.get(id_foto) and self._deteccion_resultados[id_foto].valid_for_next_step
         )
         frutos_validos = 0
+        fotos_analizadas = 0
         for id_foto in seleccionadas:
             res = self._frutos_resultados.get(id_foto)
             if not res:
                 continue
+            fotos_analizadas += 1
             frutos_validos += len([item for item in res.fruits if item.valid])
         self.resumen_global_var.set(
             f"Fotos encontradas: {total_fotos} | Fotos seleccionadas: {total_seleccionadas} | "
-            f"Fotos aptas IA: {aptas_ia} | Fotos patrón válido: {patrones_validos} | Frutos válidos: {frutos_validos}"
+            f"Fotos aptas IA: {aptas_ia} | Fotos patrón válido: {patrones_validos} | Fotos analizadas: {fotos_analizadas} | "
+            f"Frutos válidos: {frutos_validos}"
         )
+        if hasattr(self, "resumen_fases_var"):
+            ia_estado = "pendiente"
+            if resultados_ia:
+                evaluadas = sum(1 for id_foto in seleccionadas if id_foto in resultados_ia)
+                ia_estado = f"completada, {aptas_ia} aptas ({evaluadas}/{total_seleccionadas} evaluadas)"
+            patron_estado = "pendiente" if patrones_validos == 0 else f"{patrones_validos} fotos válidas"
+            frutos_estado = "pendiente" if fotos_analizadas == 0 else f"{frutos_validos} frutos válidos"
+            preparacion_estado = "lista" if self._analysis_payload.get("id_muestra") == self._current_muestra_id else "pendiente"
+            estado_final = "listo" if preparacion_estado == "lista" else ("en proceso" if total_seleccionadas > 0 else "pendiente")
+            self.resumen_fases_var.set(
+                f"1. Selección: {total_seleccionadas}/{total_fotos} fotos\n"
+                f"2. IA: {ia_estado}\n"
+                f"3. Patrón: {patron_estado}\n"
+                f"4. Frutos: {frutos_estado}\n"
+                f"5. Preparación: {preparacion_estado}\n"
+                f"Estado final: {estado_final}"
+            )
 
     def _actualizar_resumen_fotos(self) -> None:
         if not self._current_muestra_id:
@@ -1665,6 +1964,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._selected_fotos_by_muestra[self._current_muestra_id] = {
             str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")
         }
+        self._analysis_payload = {}
         self._deteccion_resultados = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
@@ -1678,6 +1978,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         if not self._current_muestra_id:
             return
         self._selected_fotos_by_muestra[self._current_muestra_id] = set()
+        self._analysis_payload = {}
         self._deteccion_resultados = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
@@ -1694,6 +1995,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         todos = {str(foto.get("id_foto", "")) for foto in fotos if foto.get("id_foto")}
         actuales = self._selected_fotos_by_muestra.get(self._current_muestra_id, set())
         self._selected_fotos_by_muestra[self._current_muestra_id] = todos.difference(actuales)
+        self._analysis_payload = {}
         self._deteccion_resultados = {}
         self._frutos_resultados = {}
         self._frutos_overlay_paths_by_foto = {}
