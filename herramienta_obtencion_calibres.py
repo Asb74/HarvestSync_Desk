@@ -44,6 +44,7 @@ LOGGER = logging.getLogger(__name__)
 DB_FRUTA_PATH = r"X:\BasesSQLite\DBfruta.sqlite"
 CALIBRES_IA_HISTORY_DB_ENV = "HARVESTSYNC_CALIBRES_IA_DB_PATH"
 CALIBRES_IA_HISTORY_DB_DEFAULT_PATH = r"\\Personal\C\BasesSQLite\DBcalibres_ia.sqlite"
+PROMPT_VERSION = "v1_estimacion_base"
 CALIBRES_CALIBRADOR = [f"CAL {idx}" for idx in range(10)]
 FILTRO_CALIBRADOR_CAMPANA = "2026"
 FILTRO_CALIBRADOR_EMPRESA = "1"
@@ -467,12 +468,11 @@ class CalibresIAHistoryRepository:
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_variedad ON comparaciones_calibres (variedad)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_cultivo ON comparaciones_calibres (cultivo)")
-                conn.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS ux_comp_calibres_dedupe
-                    ON comparaciones_calibres (boleta, albaran, id_foto, modelo_ia, prompt_version)
-                    """
-                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_prompt_version ON comparaciones_calibres (prompt_version)")
+                cols = {str(row[1]).strip().lower() for row in conn.execute("PRAGMA table_info(comparaciones_calibres)").fetchall()}
+                if "prompt_version" not in cols:
+                    conn.execute("ALTER TABLE comparaciones_calibres ADD COLUMN prompt_version TEXT")
+                conn.execute("DROP INDEX IF EXISTS ux_comp_calibres_dedupe")
                 conn.commit()
             db_exists_after = os.path.exists(self.db_path)
             LOGGER.info(
@@ -527,12 +527,7 @@ class CalibresIAHistoryRepository:
             "observaciones",
         ]
         placeholders = ", ".join(["?"] * len(columns))
-        assignments = ", ".join([f"{col}=excluded.{col}" for col in columns if col not in {"fecha_registro"}])
-        sql = (
-            f"INSERT INTO comparaciones_calibres ({', '.join(columns)}) VALUES ({placeholders}) "
-            "ON CONFLICT(boleta, albaran, id_foto, modelo_ia, prompt_version) DO UPDATE SET "
-            f"{assignments}"
-        )
+        sql = f"INSERT INTO comparaciones_calibres ({', '.join(columns)}) VALUES ({placeholders})"
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("PRAGMA busy_timeout = 5000;")
             payload = [tuple(row.get(col) for col in columns) for row in rows]
@@ -569,6 +564,7 @@ class CalibresIAHistoryRepository:
         variedad: str = "",
         cultivo: str = "",
         calidad: str = "",
+        prompt_version: str = "",
     ) -> tuple[list[str], list[Any]]:
         filtros_sql: list[str] = []
         params: list[Any] = []
@@ -597,6 +593,10 @@ class CalibresIAHistoryRepository:
                 ) = ?"""
             )
             params.append(calidad_limpia)
+        version_limpia = prompt_version.strip()
+        if version_limpia and version_limpia.upper() != "TODAS":
+            filtros_sql.append("COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') = ?")
+            params.append(version_limpia)
         return filtros_sql, params
 
     def list_comparisons(
@@ -607,14 +607,17 @@ class CalibresIAHistoryRepository:
         variedad: str = "",
         cultivo: str = "",
         calidad: str = "",
+        prompt_version: str = "",
         limit: int = 500,
     ) -> list[dict[str, Any]]:
+        self.ensure_schema()
         filtros_sql, params = self._build_filtros_sql(
             boleta=boleta,
             albaran=albaran,
             variedad=variedad,
             cultivo=cultivo,
             calidad=calidad,
+            prompt_version=prompt_version,
         )
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
@@ -627,6 +630,7 @@ class CalibresIAHistoryRepository:
                 cultivo,
                 id_foto,
                 modelo_ia,
+                COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS prompt_version,
                 confianza_ia,
                 calibre_dominante_ia,
                 calibre_dominante_real,
@@ -659,14 +663,17 @@ class CalibresIAHistoryRepository:
         variedad: str = "",
         cultivo: str = "",
         calidad: str = "",
+        prompt_version: str = "",
         limit: int = 500,
     ) -> list[dict[str, Any]]:
+        self.ensure_schema()
         filtros_sql, params = self._build_filtros_sql(
             boleta=boleta,
             albaran=albaran,
             variedad=variedad,
             cultivo=cultivo,
             calidad=calidad,
+            prompt_version=prompt_version,
         )
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
@@ -679,6 +686,7 @@ class CalibresIAHistoryRepository:
                 cultivo,
                 id_foto,
                 modelo_ia,
+                COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS prompt_version,
                 confianza_ia,
                 calibre_dominante_ia,
                 calibre_dominante_real,
@@ -707,6 +715,7 @@ class CalibresIAHistoryRepository:
         return [dict(row) for row in rows]
 
     def get_comparison_detail(self, comparison_id: int) -> dict[str, Any] | None:
+        self.ensure_schema()
         sql = """
             SELECT *
             FROM comparaciones_calibres
@@ -728,13 +737,16 @@ class CalibresIAHistoryRepository:
         variedad: str = "",
         cultivo: str = "",
         calidad: str = "",
+        prompt_version: str = "",
     ) -> dict[str, Any]:
+        self.ensure_schema()
         filtros_sql, params = self._build_filtros_sql(
             boleta=boleta,
             albaran=albaran,
             variedad=variedad,
             cultivo=cultivo,
             calidad=calidad,
+            prompt_version=prompt_version,
         )
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql_base = f"""
@@ -796,6 +808,33 @@ class CalibresIAHistoryRepository:
             "total_mala": int(base["total_mala"] or 0),
             "total_muy_mala": int(base["total_muy_mala"] or 0),
         }
+
+    def list_prompt_versions(self) -> list[str]:
+        self.ensure_schema()
+        sql = """
+            SELECT DISTINCT COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS version
+            FROM comparaciones_calibres
+            ORDER BY version ASC
+        """
+        try:
+            with self._connect_readonly() as conn:
+                rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError as exc:
+            self._parse_tabla_no_existe(exc)
+        return [str(row["version"]) for row in rows if str(row["version"]).strip()]
+
+    def get_summary_by_version(self, **filtros: Any) -> list[dict[str, Any]]:
+        base = dict(filtros)
+        base["prompt_version"] = ""
+        versiones = self.list_prompt_versions()
+        resumenes: list[dict[str, Any]] = []
+        for version in versiones:
+            query = dict(base)
+            query["prompt_version"] = version
+            resumen = self.get_summary(**query)
+            resumen["prompt_version"] = version
+            resumenes.append(resumen)
+        return resumenes
 
 
 class CalibresDataService:
@@ -908,6 +947,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         self.variedad_var = tk.StringVar()
         self.cultivo_var = tk.StringVar()
         self.calidad_var = tk.StringVar(value="TODAS")
+        self.prompt_version_var = tk.StringVar(value="TODAS")
         self.estado_var = tk.StringVar(value=f"Origen DB: {self.history_repo.db_path}")
         self.resumen_var = tk.StringVar(
             value=(
@@ -919,6 +959,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         self.resumen_sesgo_var = tk.StringVar(
             value="Sesgo IA por calibre: sin datos (aplique filtros y ejecute búsqueda)."
         )
+        self.resumen_version_var = tk.StringVar(value="Comparativa por versión: sin datos.")
 
         self._build_ui()
         self._buscar_historico()
@@ -933,8 +974,8 @@ class CalibresIAHistoryWindow(tk.Toplevel):
 
         filtros = ttk.LabelFrame(container, text="Filtros", padding=8)
         filtros.grid(row=0, column=0, sticky="ew")
-        for col in range(10):
-            filtros.columnconfigure(col, weight=1 if col in {1, 3, 5, 7, 9} else 0)
+        for col in range(12):
+            filtros.columnconfigure(col, weight=1 if col in {1, 3, 5, 7, 9, 11} else 0)
 
         ttk.Label(filtros, text="Boleta:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
         ttk.Entry(filtros, textvariable=self.boleta_var).grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=2)
@@ -952,8 +993,17 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             values=("TODAS", "BUENA", "ACEPTABLE", "MALA", "MUY_MALA"),
             width=14,
         ).grid(row=0, column=9, sticky="ew", padx=(0, 10), pady=2)
+        ttk.Label(filtros, text="Prompt ver.:").grid(row=0, column=10, sticky="w", padx=(0, 6), pady=2)
+        self.combo_prompt_version = ttk.Combobox(
+            filtros,
+            textvariable=self.prompt_version_var,
+            state="readonly",
+            values=("TODAS", "sin_version"),
+            width=18,
+        )
+        self.combo_prompt_version.grid(row=0, column=11, sticky="ew", padx=(0, 10), pady=2)
         ttk.Button(filtros, text="Buscar histórico", command=self._buscar_historico).grid(
-            row=1, column=9, sticky="e", pady=(8, 0)
+            row=1, column=11, sticky="e", pady=(8, 0)
         )
 
         ttk.Label(container, textvariable=self.estado_var, foreground="#34495e").grid(row=1, column=0, sticky="ew", pady=(8, 3))
@@ -973,6 +1023,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "variedad",
             "id_foto",
             "modelo_ia",
+            "prompt_version",
             "confianza_ia",
             "calibre_dominante_ia",
             "calibre_dominante_real",
@@ -988,6 +1039,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "variedad": "Variedad",
             "id_foto": "Id foto",
             "modelo_ia": "Modelo IA",
+            "prompt_version": "Prompt ver.",
             "confianza_ia": "Confianza",
             "calibre_dominante_ia": "Dominante IA",
             "calibre_dominante_real": "Dominante real",
@@ -1002,6 +1054,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "variedad": 120,
             "id_foto": 190,
             "modelo_ia": 150,
+            "prompt_version": 140,
             "confianza_ia": 85,
             "calibre_dominante_ia": 120,
             "calibre_dominante_real": 120,
@@ -1052,6 +1105,35 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             row=2, column=0, sticky="e"
         )
 
+        frame_version = ttk.LabelFrame(container, text="Comparativa por versión", padding=6)
+        frame_version.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        frame_version.columnconfigure(0, weight=1)
+        version_cols = (
+            "prompt_version", "numero_registros", "error_medio_global", "error_total_medio",
+            "dominante_ia_mas_frecuente", "dominante_real_mas_frecuente",
+            "total_buena", "total_aceptable", "total_mala", "total_muy_mala",
+        )
+        self.tree_version = ttk.Treeview(frame_version, columns=version_cols, show="headings", height=5)
+        labels = {
+            "prompt_version": "Versión",
+            "numero_registros": "Registros",
+            "error_medio_global": "Error medio",
+            "error_total_medio": "Error total medio",
+            "dominante_ia_mas_frecuente": "Dom. IA",
+            "dominante_real_mas_frecuente": "Dom. real",
+            "total_buena": "BUENA",
+            "total_aceptable": "ACEPTABLE",
+            "total_mala": "MALA",
+            "total_muy_mala": "MUY_MALA",
+        }
+        for col in version_cols:
+            self.tree_version.heading(col, text=labels[col])
+            self.tree_version.column(col, width=120, anchor="w")
+        self.tree_version.grid(row=0, column=0, sticky="ew")
+        ttk.Label(frame_version, textvariable=self.resumen_version_var, foreground="#1f618d", wraplength=1180).grid(
+            row=1, column=0, sticky="ew", pady=(6, 0)
+        )
+
     def _buscar_historico(self) -> None:
         self.estado_var.set("Consultando histórico IA...")
         for item in self.tree_historial.get_children():
@@ -1066,19 +1148,32 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "variedad": self.variedad_var.get().strip(),
             "cultivo": self.cultivo_var.get().strip(),
             "calidad": "" if self.calidad_var.get() == "TODAS" else self.calidad_var.get().strip(),
+            "prompt_version": self.prompt_version_var.get().strip(),
         }
 
         def worker() -> None:
             try:
                 rows = self.history_repo.list_comparisons_for_bias(**filtros)
                 summary = self.history_repo.get_summary(**filtros)
-                self.after(0, lambda: self._on_busqueda_ok(rows, summary))
+                summary_by_version = self.history_repo.get_summary_by_version(**filtros)
+                versions = self.history_repo.list_prompt_versions()
+                self.after(0, lambda: self._on_busqueda_ok(rows, summary, summary_by_version, versions))
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda error=exc: self._on_busqueda_error(error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_busqueda_ok(self, rows: list[dict[str, Any]], summary: dict[str, Any]) -> None:
+    def _on_busqueda_ok(
+        self,
+        rows: list[dict[str, Any]],
+        summary: dict[str, Any],
+        summary_by_version: list[dict[str, Any]],
+        versions: list[str],
+    ) -> None:
+        opciones = ["TODAS", "sin_version", *[v for v in versions if v != "sin_version"]]
+        self.combo_prompt_version.configure(values=opciones)
+        if self.prompt_version_var.get() not in opciones:
+            self.prompt_version_var.set("TODAS")
         if not rows:
             self.estado_var.set("Sin registros para los filtros aplicados.")
         else:
@@ -1097,6 +1192,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                     row.get("variedad", "-"),
                     row.get("id_foto", "-"),
                     row.get("modelo_ia", "-"),
+                    row.get("prompt_version", "sin_version"),
                     self._fmt_number(row.get("confianza_ia")),
                     row.get("calibre_dominante_ia", "-"),
                     row.get("calibre_dominante_real", "-"),
@@ -1124,6 +1220,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         analisis_sesgo = calcular_sesgo_por_calibre(rows)
         self._current_rows_data = rows
         self._render_sesgo(analisis_sesgo)
+        self._render_summary_version(summary_by_version)
 
     def _on_busqueda_error(self, exc: Exception) -> None:
         self.estado_var.set(f"Error consultando histórico IA: {exc}")
@@ -1132,7 +1229,33 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "BUENA=0 | ACEPTABLE=0 | MALA=0 | MUY_MALA=0"
         )
         self._limpiar_panel_sesgo()
+        self._render_summary_version([])
         messagebox.showerror("Histórico IA", f"No se pudo consultar la base histórica:\n{exc}", parent=self)
+
+    def _render_summary_version(self, summary_by_version: list[dict[str, Any]]) -> None:
+        for item in self.tree_version.get_children():
+            self.tree_version.delete(item)
+        if not summary_by_version:
+            self.resumen_version_var.set("Comparativa por versión: sin datos.")
+            return
+        for item in summary_by_version:
+            self.tree_version.insert(
+                "",
+                "end",
+                values=(
+                    item.get("prompt_version", "sin_version"),
+                    item.get("numero_registros", 0),
+                    self._fmt_number(item.get("error_medio_global")),
+                    self._fmt_number(item.get("error_total_medio")),
+                    item.get("dominante_ia_mas_frecuente", "-"),
+                    item.get("dominante_real_mas_frecuente", "-"),
+                    item.get("total_buena", 0),
+                    item.get("total_aceptable", 0),
+                    item.get("total_mala", 0),
+                    item.get("total_muy_mala", 0),
+                ),
+            )
+        self.resumen_version_var.set(f"Versiones con datos: {len(summary_by_version)}.")
 
     def _render_sesgo(self, analisis: dict[str, Any]) -> None:
         for item in self.tree_sesgo.get_children():
@@ -1218,7 +1341,9 @@ class CalibresIAHistoryWindow(tk.Toplevel):
 
         meta = (
             f"Fecha={detail.get('fecha_registro', '-')} | Boleta={detail.get('boleta', '-')} | "
-            f"Albarán={detail.get('albaran', '-')} | Variedad={detail.get('variedad', '-')} | Foto={detail.get('id_foto', '-')}"
+            f"Albarán={detail.get('albaran', '-')} | Variedad={detail.get('variedad', '-')} | "
+            f"Prompt={str(detail.get('prompt_version', '') or '').strip() or 'sin_version'} | "
+            f"Foto={detail.get('id_foto', '-')}"
         )
         ttk.Label(frame, text=meta, foreground="#34495e", wraplength=940).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
@@ -3045,7 +3170,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         advertencias = estimacion.get("advertencias", [])
         advertencias_texto = " | ".join(str(item).strip() for item in advertencias if str(item).strip())
         raw_result = estimacion.get("raw_result", {})
-        prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or "estimacion_calibres_v1"
+        prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or PROMPT_VERSION
 
         row = {
             "fecha_registro": datetime.now(timezone.utc).isoformat(timespec="seconds"),
