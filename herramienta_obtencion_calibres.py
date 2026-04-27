@@ -17,7 +17,7 @@ from typing import Any
 import requests
 import tkinter as tk
 from firebase_admin import firestore
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from ui_utils import BaseToolWindow
 from calibres_vision import (
@@ -367,6 +367,59 @@ def listar_entregas_por_boleta(
         entrega["neto"] = _valor_a_float(row["Neto"], 0.0)
         entregas.append(entrega)
     return entregas
+
+
+def listar_variedades_por_boleta(
+    db_path: str,
+    boleta: str,
+    cultivo: str = "",
+    campana: str | None = None,
+    empresa: str | None = None,
+) -> list[str]:
+    """Obtiene variedades distintas para una boleta desde DBfruta (solo lectura)."""
+    boleta_norm = str(boleta or "").strip()
+    if not boleta_norm:
+        return []
+
+    cultivo_norm = str(cultivo or "").strip().upper()
+    campana_norm = str(campana or "").strip() if campana is not None else ""
+    empresa_norm = str(empresa or "").strip() if empresa is not None else ""
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    try:
+        sql = """
+        SELECT DISTINCT TRIM(COALESCE(Variedad, '')) AS Variedad
+        FROM PesosFres
+        WHERE TRIM(COALESCE(Boleta, '')) = ?
+          AND (UPPER(TRIM(COALESCE(CULTIVO, ''))) = ? OR ? = '')
+          AND (TRIM(COALESCE(CAMPAÑA, '')) = ? OR ? = '')
+          AND (TRIM(COALESCE(EMPRESA, '')) = ? OR ? = '')
+        ORDER BY UPPER(TRIM(COALESCE(Variedad, ''))) ASC
+        """
+        rows = conn.execute(
+            sql,
+            (
+                boleta_norm,
+                cultivo_norm,
+                cultivo_norm,
+                campana_norm,
+                campana_norm,
+                empresa_norm,
+                empresa_norm,
+            ),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    variedades: list[str] = []
+    for row in rows:
+        variedad = str(row["Variedad"] or "").strip().upper()
+        if variedad:
+            variedades.append(variedad)
+    return sorted(set(variedades))
 
 
 def cargar_calibrador_por_entrega(entrega: dict[str, Any]) -> dict[str, Any]:
@@ -1602,6 +1655,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._boleta_entregas_calibrador: str = ""
         self._selector_entrega_map: dict[str, dict[str, Any] | None] = {}
         self.selector_entrega_var = tk.StringVar(value=OPCION_BOLETA_COMPLETA)
+        self.ia_contexto_prompt_var = tk.StringVar(value="IA: cultivo=- | variedad=- | prompt=- | source=-")
+        self.ia_aviso_prompt_var = tk.StringVar(value="Aviso IA: -")
         self._history_window: CalibresIAHistoryWindow | None = None
 
         self._build_ui()
@@ -1840,6 +1895,26 @@ class ObtencionCalibresWindow(BaseToolWindow):
             wraplength=980,
             justify="left",
         ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(
+            estimacion_frame,
+            textvariable=self.ia_contexto_prompt_var,
+            foreground="#1f618d",
+            wraplength=980,
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(
+            estimacion_frame,
+            textvariable=self.ia_aviso_prompt_var,
+            foreground="#b9770e",
+            wraplength=980,
+            justify="left",
+        ).grid(row=4, column=0, sticky="w", pady=(2, 0))
+        ttk.Button(
+            estimacion_frame,
+            text="Crear prompt para variedad",
+            state="disabled",
+            command=lambda: messagebox.showinfo("Obtención calibres", "Pendiente de implementar.", parent=self),
+        ).grid(row=5, column=0, sticky="w", pady=(6, 0))
 
         comparacion_frame = ttk.LabelFrame(tab_validacion_ia, text="Comparación IA vs calibrador normalizado", padding=6)
         comparacion_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
@@ -2702,7 +2777,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.estado_var.set(f"Validación IA en curso para foto {id_foto}...")
         timeout_seconds = 25
         cultivo = self._resolver_cultivo_ia()
-        variedad = self._resolver_variedad_ia()
+        variedad = self._resolver_variedad_ia(cultivo)
 
         def worker() -> None:
             t0 = time.perf_counter()
@@ -3021,6 +3096,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
         if hasattr(self, "advertencias_estimacion_ia_var"):
             self.advertencias_estimacion_ia_var.set("Advertencias estimación IA experimental: -")
+        if hasattr(self, "ia_contexto_prompt_var"):
+            self.ia_contexto_prompt_var.set("IA: cultivo=- | variedad=- | prompt=- | source=-")
+        if hasattr(self, "ia_aviso_prompt_var"):
+            self.ia_aviso_prompt_var.set("Aviso IA: -")
         self._actualizar_resumen_global()
 
     def _limpiar_resultados_comparacion_calibres(self) -> None:
@@ -3085,12 +3164,80 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return
         self.contexto_comparacion_var.set(f"Contexto: Entrega concreta -> {self._formatear_opcion_entrega(entrega)}")
 
-    def _resolver_variedad_ia(self) -> str:
+    @staticmethod
+    def _normalizar_campo_ia(value: Any) -> str:
+        texto = str(value or "").strip().upper()
+        return texto or "*"
+
+    def _resolver_variedad_desde_foto_o_muestra(self) -> str:
+        if self._current_cards:
+            for card in self._current_cards:
+                foto = card.get("foto", {}) if isinstance(card, dict) else {}
+                for key in ("variedad", "Variedad"):
+                    candidata = self._normalizar_campo_ia(foto.get(key, ""))
+                    if candidata != "*":
+                        return candidata
+                muestra = card.get("muestra", {}) if isinstance(card, dict) else {}
+                for key in ("variedad", "Variedad"):
+                    candidata = self._normalizar_campo_ia(muestra.get(key, ""))
+                    if candidata != "*":
+                        return candidata
+        muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
+        if isinstance(muestra, dict):
+            for key in ("variedad", "Variedad"):
+                candidata = self._normalizar_campo_ia(muestra.get(key, ""))
+                if candidata != "*":
+                    return candidata
+        return "*"
+
+    def _seleccionar_variedad_manual(self, opciones: list[str], boleta: str) -> str:
+        if not opciones:
+            return "*"
+        prompt = (
+            f"Boleta {boleta}: se detectaron múltiples variedades.\n"
+            f"Opciones: {', '.join(opciones)}\n\n"
+            "Escriba una variedad exacta para continuar."
+        )
+        seleccion = simpledialog.askstring("Seleccionar variedad", prompt, parent=self)
+        seleccion_norm = self._normalizar_campo_ia(seleccion)
+        if seleccion_norm == "*" or seleccion_norm not in opciones:
+            return "*"
+        return seleccion_norm
+
+    def _resolver_variedad_ia(self, cultivo_real: str | None = None) -> str:
+        variedad_muestra = self._resolver_variedad_desde_foto_o_muestra()
+        if variedad_muestra != "*":
+            return variedad_muestra
+
         clave = self.selector_entrega_var.get().strip() or OPCION_BOLETA_COMPLETA
         if clave != OPCION_BOLETA_COMPLETA:
             entrega = self._selector_entrega_map.get(clave) or {}
-            variedad = str(entrega.get("Variedad", "") or "").strip().upper()
-            return variedad or "*"
+            variedad = self._normalizar_campo_ia(entrega.get("Variedad", ""))
+            if variedad != "*":
+                return variedad
+
+        boleta = self._get_boleta_actual()
+        cultivo_norm = self._normalizar_campo_ia(cultivo_real)
+        cultivo_query = "" if cultivo_norm == "*" else cultivo_norm
+        campana = FILTRO_CALIBRADOR_CAMPANA or ""
+        empresa = FILTRO_CALIBRADOR_EMPRESA or ""
+        try:
+            variedades_boleta = listar_variedades_por_boleta(
+                DB_FRUTA_PATH,
+                boleta=boleta,
+                cultivo=cultivo_query,
+                campana=campana,
+                empresa=empresa,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("No se pudo resolver variedad desde DBfruta. boleta=%s error=%s", boleta, exc)
+            variedades_boleta = []
+
+        if len(variedades_boleta) == 1:
+            return variedades_boleta[0]
+        if len(variedades_boleta) > 1:
+            return self._seleccionar_variedad_manual(variedades_boleta, boleta)
+
         variedades = {
             str(entrega.get("Variedad", "") or "").strip().upper()
             for entrega in self._entregas_calibrador
@@ -3102,9 +3249,16 @@ class ObtencionCalibresWindow(BaseToolWindow):
         return "*"
 
     def _resolver_cultivo_ia(self) -> str:
+        if self._current_cards:
+            for card in self._current_cards:
+                foto = card.get("foto", {}) if isinstance(card, dict) else {}
+                for key in ("cultivo", "Cultivo"):
+                    candidata = self._normalizar_campo_ia(foto.get(key, ""))
+                    if candidata != "*":
+                        return candidata
         muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
-        cultivo = str(muestra.get("cultivo", "")).strip().upper() if muestra else ""
-        return cultivo or "*"
+        cultivo = self._normalizar_campo_ia(muestra.get("cultivo", "") if muestra else "")
+        return cultivo
 
     def _cargar_entregas_calibrador(self) -> None:
         boleta = self._get_boleta_actual()
@@ -3577,6 +3731,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         advertencias: list[str] = []
         consolidado: dict[str, float] = {}
         count_distribucion = 0
+        ultimo_prompt_ctx = "IA: cultivo=- | variedad=- | prompt=- | source=-"
+        avisos_prompt: list[str] = []
 
         for id_foto in sorted(resultados.keys()):
             row = resultados[id_foto]
@@ -3618,6 +3774,23 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     estado if not row.get("error") else row.get("estado", "Error"),
                 ),
             )
+            raw_result = row.get("raw_result", {}) if isinstance(row, dict) else {}
+            cultivo_ia = self._normalizar_campo_ia(raw_result.get("cultivo", ""))
+            variedad_ia = self._normalizar_campo_ia(raw_result.get("variedad", ""))
+            prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or "-"
+            prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
+            ultimo_prompt_ctx = (
+                f"IA: cultivo={cultivo_ia} | variedad={variedad_ia} | prompt={prompt_version} | source={prompt_source}"
+            )
+            if variedad_ia == "*":
+                avisos_prompt.append("No se pudo determinar la variedad. Se usará prompt genérico.")
+            if prompt_source in {"sqlite_cultivo", "sqlite_generico"}:
+                avisos_prompt.append("No existe prompt específico para esta variedad. Se ha usado un prompt genérico.")
+                if cultivo_ia != "*":
+                    avisos_prompt.append(
+                        f"Se ha usado prompt genérico de {cultivo_ia}. "
+                        "Puede crear un prompt específico para la variedad enviada si desea afinar el aprendizaje."
+                    )
 
         confianza_media = f"{(sum(conf_values) / len(conf_values)):.2f}" if conf_values else "-"
         consolidado_texto = "-"
@@ -3641,6 +3814,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "Advertencias estimación IA experimental: "
             + (" | ".join(advertencias_unicas[:5]) if advertencias_unicas else "-")
         )
+        self.ia_contexto_prompt_var.set(ultimo_prompt_ctx)
+        avisos_unicos = []
+        for aviso in avisos_prompt:
+            if aviso not in avisos_unicos:
+                avisos_unicos.append(aviso)
+        self.ia_aviso_prompt_var.set("Aviso IA: " + (" | ".join(avisos_unicos[:3]) if avisos_unicos else "-"))
         self._actualizar_resumen_global()
 
     def _ejecutar_estimacion_calibres_ia(self) -> None:
@@ -3687,8 +3866,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
         muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
         cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
-        cultivo_payload = cultivo.strip().upper() or "*"
-        variedad = self._resolver_variedad_ia()
+        cultivo_payload = self._resolver_cultivo_ia()
+        variedad = self._resolver_variedad_ia(cultivo_payload)
         rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
         diametro_patron = self._config.diametro_patron_mm if self._config else 94.0
         if not rangos:
@@ -3711,7 +3890,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         contexto_base = {
             "tipo_tarea": "estimacion_calibres_experimental",
-            "cultivo": cultivo,
+            "cultivo": cultivo_payload,
             "variedad": variedad,
             "diametro_patron_mm": diametro_patron,
             "rangos_calibres": rangos,
@@ -3756,11 +3935,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     contexto["id_foto"] = id_foto
                     contexto["image_url"] = image_url_for_ai
                     LOGGER.info(
-                        "Estimación IA request: id_foto=%s image_url=%s task=%s cultivo=%s rangos=%s",
+                        "Estimación IA request: id_foto=%s image_url=%s task=%s cultivo=%s variedad=%s rangos=%s",
                         id_foto,
                         image_url_for_ai,
                         "estimacion_calibres",
-                        cultivo,
+                        cultivo_payload,
+                        variedad,
                         len(rangos),
                     )
                     result = call_analyze_image(
@@ -3871,7 +4051,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return
         LOGGER.info("Flujo recomendado: inicio muestra=%s source_ia=%s", self._current_muestra_id, source)
         cultivo_ia = self._resolver_cultivo_ia()
-        variedad_ia = self._resolver_variedad_ia()
+        variedad_ia = self._resolver_variedad_ia(cultivo_ia)
 
         self._flujo_recomendado_en_curso = True
         self._set_controles_lote_ia_habilitados(False)
@@ -4085,7 +4265,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.estado_var.set(f"Validando IA 0/{len(ids_seleccionadas)}...")
         resultados_lote = self._get_ia_resultados_muestra_actual()
         cultivo_ia = self._resolver_cultivo_ia()
-        variedad_ia = self._resolver_variedad_ia()
+        variedad_ia = self._resolver_variedad_ia(cultivo_ia)
 
         def worker() -> None:
             batch_t0 = time.perf_counter()

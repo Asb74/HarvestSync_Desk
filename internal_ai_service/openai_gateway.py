@@ -273,11 +273,11 @@ class OpenAIGateway:
         self.seed_prompts_if_empty()
         with sqlite3.connect(str(self.prompts_db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            levels = [
-                (cultivo_norm, variedad_norm, "sqlite_exact"),
-                (cultivo_norm, "*", "sqlite_cultivo"),
-                ("*", "*", "sqlite_generico"),
-            ]
+            exact_source = "sqlite_exact" if (cultivo_norm != "*" and variedad_norm != "*") else "sqlite_cultivo"
+            levels = [(cultivo_norm, variedad_norm, exact_source)]
+            if variedad_norm != "*":
+                levels.append((cultivo_norm, "*", "sqlite_cultivo"))
+            levels.append(("*", "*", "sqlite_generico"))
             for cultivo_q, variedad_q, source in levels:
                 row = conn.execute(
                     """
