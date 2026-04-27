@@ -1164,6 +1164,9 @@ class CalibresIAHistoryRepository:
                 self.ensure_column_exists(conn, "comparaciones_calibres", "error_absoluto_medio", "REAL")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "error_total_absoluto", "REAL")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "calibre_dominante_real", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "patron_detectado", "INTEGER")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "diametro_patron_px", "REAL")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "mm_por_px", "REAL")
                 for idx in range(10):
                     self.ensure_column_exists(conn, "comparaciones_calibres", f"real_norm_cal{idx}", "REAL")
                     self.ensure_column_exists(conn, "comparaciones_calibres", f"real_bruto_cal{idx}", "REAL")
@@ -1214,6 +1217,9 @@ class CalibresIAHistoryRepository:
             "desmesa",
             "destrio_total",
             "suma_calibres_real",
+            "patron_detectado",
+            "diametro_patron_px",
+            "mm_por_px",
             *[f"ia_cal{idx}" for idx in range(10)],
             *[f"real_norm_cal{idx}" for idx in range(10)],
             *[f"real_bruto_cal{idx}" for idx in range(10)],
@@ -4896,6 +4902,30 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return acumulado
         return {calibre: (valor * 100.0 / total) for calibre, valor in acumulado.items()}
 
+    def _get_patron_info_by_foto(self, id_foto: str) -> dict[str, Any]:
+        result = self._deteccion_resultados.get(id_foto)
+        diametro_patron_mm = float(self._config.diametro_patron_mm if self._config else 94.0)
+        if not result:
+            return {
+                "patron_detectado": False,
+                "diametro_patron_mm": diametro_patron_mm,
+                "diametro_patron_px": None,
+                "mm_por_px": None,
+                "estado_patron": "deteccion_no_ejecutada",
+                "warning_sin_escala": True,
+            }
+        estado = "detectado" if result.detected and result.mm_per_pixel is not None else "sin_patron"
+        if result.error and not result.detected:
+            estado = f"sin_patron: {result.error}"
+        return {
+            "patron_detectado": bool(result.detected and result.mm_per_pixel is not None),
+            "diametro_patron_mm": diametro_patron_mm,
+            "diametro_patron_px": float(result.diameter_px) if result.diameter_px is not None else None,
+            "mm_por_px": float(result.mm_per_pixel) if result.mm_per_pixel is not None else None,
+            "estado_patron": estado,
+            "warning_sin_escala": not bool(result.detected and result.mm_per_pixel is not None),
+        }
+
     def _build_historial_row(self, id_foto: str, estimacion: dict[str, Any]) -> dict[str, Any]:
         comparacion = self._comparacion_ia_vs_calibrador
         contexto = self._contexto_comparacion_actual
@@ -4925,6 +4955,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
         cultivo_ia = str(raw_result.get("cultivo", "") or "").strip()
         variedad_ia = str(raw_result.get("variedad", "") or "").strip()
+        patron_info = self._get_patron_info_by_foto(id_foto)
+        if patron_info["warning_sin_escala"]:
+            advertencias_texto = (
+                (advertencias_texto + " | ") if advertencias_texto else ""
+            ) + "Foto estimada sin escala física fiable."
 
         row = {
             "fecha_registro": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -4956,6 +4991,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "desmesa": self._to_float_or_none(calibrador.get("des_mesa")),
             "destrio_total": self._to_float_or_none(calibrador.get("destrio_total")),
             "suma_calibres_real": self._to_float_or_none(calibrador.get("suma_calibres")),
+            "patron_detectado": 1 if patron_info["patron_detectado"] else 0,
+            "diametro_patron_px": patron_info["diametro_patron_px"],
+            "mm_por_px": patron_info["mm_por_px"],
             "advertencias_ia": advertencias_texto,
             "resumen_ia": str(estimacion.get("resumen", "") or "").strip(),
             "output_ia_json": output_json_text,
@@ -4989,6 +5027,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         advertencias_texto = " | ".join(str(item).strip() for item in advertencias if str(item).strip())
         distribucion_foto = self._normalizar_distribucion_por_foto(estimacion.get("distribucion", []))
         dominante_ia = max(distribucion_foto.items(), key=lambda item: item[1])[0] if distribucion_foto else ""
+        patron_info = self._get_patron_info_by_foto(id_foto)
+        if patron_info["warning_sin_escala"]:
+            advertencias_texto = (
+                (advertencias_texto + " | ") if advertencias_texto else ""
+            ) + "Foto estimada sin escala física fiable."
         row: dict[str, Any] = {
             "fecha_registro": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "fecha_estimacion": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -5018,6 +5061,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "desmesa": None,
             "destrio_total": None,
             "suma_calibres_real": None,
+            "patron_detectado": 1 if patron_info["patron_detectado"] else 0,
+            "diametro_patron_px": patron_info["diametro_patron_px"],
+            "mm_por_px": patron_info["mm_por_px"],
             "advertencias_ia": advertencias_texto,
             "resumen_ia": str(estimacion.get("resumen", "") or "").strip(),
             "output_ia_json": output_json_text,
@@ -5269,9 +5315,15 @@ class ObtencionCalibresWindow(BaseToolWindow):
         prompt_source_values: list[str] = []
         hubo_fallback_internal = False
         sin_prompt_especifico = False
+        fotos_con_patron = 0
+        fotos_sin_patron = 0
 
         for id_foto in sorted(resultados.keys()):
             row = resultados[id_foto]
+            if row.get("patron_detectado") is True:
+                fotos_con_patron += 1
+            else:
+                fotos_sin_patron += 1
             if row.get("error"):
                 estado = row.get("estado", "Error")
             else:
@@ -5356,7 +5408,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             f"fotos estimadas={len(resultados)} | fotos aptas={aptas} | "
             f"distribución CAL0..CAL9={consolidado_texto} | dominante={dominante_consolidado} | "
             f"confianza media={confianza_media} | prompt_version dominante={prompt_version_dominante} | "
-            f"prompt_source={prompt_source_unico} | Método de consolidación: media simple"
+            f"prompt_source={prompt_source_unico} | Escala IA: patrón detectado en {fotos_con_patron}/{len(resultados)} fotos | "
+            f"sin patrón={fotos_sin_patron} | Método de consolidación: media simple"
         )
         advertencias_unicas = []
         for adv in advertencias:
@@ -5389,6 +5442,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             avisos_unicos.append("Al menos una foto usó fallback_internal.")
         if sin_prompt_especifico:
             avisos_unicos.append("No hay prompt específico para alguna variedad en el muestreo.")
+        if fotos_sin_patron > 0:
+            avisos_unicos.append("Hay fotos estimadas sin escala física fiable.")
         boleta_actual = self._get_boleta_actual()
         if boleta_actual:
             try:
@@ -5428,19 +5483,16 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return
 
         ids_candidatas = set(ids_aptas_ia)
-        if self._deteccion_resultados:
-            ids_candidatas = {
-                id_foto
-                for id_foto in ids_candidatas
-                if self._deteccion_resultados.get(id_foto) and self._deteccion_resultados[id_foto].valid_for_next_step
-            }
-            if not ids_candidatas:
-                messagebox.showwarning(
-                    "Obtención calibres",
-                    "Existe resultado de patrón, pero ninguna foto apta IA tiene patrón válido.",
-                    parent=self,
-                )
-                return
+        fotos_sin_patron = [id_foto for id_foto in ids_candidatas if self._get_patron_info_by_foto(id_foto)["warning_sin_escala"]]
+        if fotos_sin_patron:
+            messagebox.showwarning(
+                "Obtención calibres",
+                (
+                    "Se estimarán fotos sin patrón detectado.\n"
+                    "Estas filas se marcarán con advertencia: 'Foto estimada sin escala física fiable.'."
+                ),
+                parent=self,
+            )
 
         cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
         muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
@@ -5510,17 +5562,39 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     image_url_for_ai = self._build_image_url_for_ai(ruta_local)
                     if not image_url_for_ai:
                         raise ValueError("No se pudo construir image_url.")
+                    patron_info = self._get_patron_info_by_foto(id_foto)
                     contexto = dict(contexto_base)
                     contexto["id_foto"] = id_foto
                     contexto["image_url"] = image_url_for_ai
+                    contexto["datos_escala_foto"] = {
+                        "patron_detectado": patron_info["patron_detectado"],
+                        "diametro_patron_mm": patron_info["diametro_patron_mm"],
+                        "diametro_patron_px": patron_info["diametro_patron_px"],
+                        "mm_por_px": patron_info["mm_por_px"],
+                        "estado_deteccion_patron": patron_info["estado_patron"],
+                        "escala_fisica_fiable": not patron_info["warning_sin_escala"],
+                    }
+                    if patron_info["patron_detectado"]:
+                        contexto["instruccion_escala"] = (
+                            "Usar el patrón como escala física obligatoria si está detectado. "
+                            "Comparar frutos completos y bien visibles contra el marcador de 94 mm. "
+                            "No basar la estimación solo en impresión visual general y no usar frutos parcialmente ocultos como evidencia principal."
+                        )
+                    else:
+                        contexto["instruccion_escala"] = (
+                            "La foto no dispone de escala física fiable. "
+                            "Reducir confianza de la estimación y advertir: 'Foto estimada sin escala física fiable.'."
+                        )
                     LOGGER.info(
-                        "Estimación IA request: id_foto=%s image_url=%s task=%s cultivo=%s variedad=%s rangos=%s",
+                        "Estimación IA request: id_foto=%s image_url=%s task=%s cultivo=%s variedad=%s rangos=%s patron=%s mm_px=%s",
                         id_foto,
                         image_url_for_ai,
                         "estimacion_calibres",
                         cultivo_payload,
                         variedad,
                         len(rangos),
+                        contexto["datos_escala_foto"]["patron_detectado"],
+                        contexto["datos_escala_foto"]["mm_por_px"],
                     )
                     result = call_analyze_image(
                         server_url=service_url,
@@ -5536,7 +5610,17 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     row["task_enviada"] = "estimacion_calibres"
                     row["image_url"] = image_url_for_ai
                     row["id_foto"] = id_foto
+                    row["patron_detectado"] = patron_info["patron_detectado"]
+                    row["diametro_patron_px"] = patron_info["diametro_patron_px"]
+                    row["mm_por_px"] = patron_info["mm_por_px"]
+                    row["estado_patron"] = patron_info["estado_patron"]
+                    row["escala_fisica_fiable"] = not patron_info["warning_sin_escala"]
                     row["error"] = not bool(parsed.get("es_valida"))
+                    if patron_info["warning_sin_escala"]:
+                        advertencias_row = [str(item).strip() for item in row.get("advertencias", []) if str(item).strip()]
+                        if "Foto estimada sin escala física fiable." not in advertencias_row:
+                            advertencias_row.append("Foto estimada sin escala física fiable.")
+                        row["advertencias"] = advertencias_row
                     if row["error"]:
                         error_tipo = str(parsed.get("error_tipo", "")).strip()
                         if error_tipo == "parse":
@@ -6087,7 +6171,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         cont.grid(row=0, column=0, sticky="nsew")
         win.rowconfigure(0, weight=1)
         win.columnconfigure(0, weight=1)
-        cont.rowconfigure(1, weight=1)
+        cont.rowconfigure(2, weight=1)
         cont.columnconfigure(0, weight=1)
 
         task_enviada = row.get("task_enviada", "estimacion_calibres")
@@ -6102,6 +6186,15 @@ class ObtencionCalibresWindow(BaseToolWindow):
         prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
         cultivo = str(raw_result.get("cultivo", "") or "").strip() or "-"
         variedad = str(raw_result.get("variedad", "") or "").strip() or "-"
+        patron_detectado = "Sí" if row.get("patron_detectado") is True else "No"
+        diametro_patron_px = row.get("diametro_patron_px")
+        mm_por_px = row.get("mm_por_px")
+        diametro_txt = f"{float(diametro_patron_px):.2f}" if isinstance(diametro_patron_px, (int, float)) else "-"
+        mm_por_px_txt = f"{float(mm_por_px):.5f}" if isinstance(mm_por_px, (int, float)) else "-"
+        estado_patron = str(row.get("estado_patron", "") or "-").strip() or "-"
+        advertencia_escala = (
+            "Estimación sin escala física fiable." if row.get("escala_fisica_fiable") is False else ""
+        )
 
         encabezado = (
             f"id_foto: {id_foto}\n"
@@ -6113,13 +6206,19 @@ class ObtencionCalibresWindow(BaseToolWindow):
             f"prompt_source: {prompt_source}\n"
             f"cultivo: {cultivo}\n"
             f"variedad: {variedad}\n"
+            f"patrón detectado: {patron_detectado}\n"
+            f"diámetro patrón px: {diametro_txt}\n"
+            f"mm/px: {mm_por_px_txt}\n"
+            f"estado patrón: {estado_patron}\n"
             f"estado: {row.get('estado', '-')}\n"
             f"diagnóstico: {diagnostico}"
         )
         ttk.Label(cont, text=encabezado, justify="left", wraplength=860).grid(row=0, column=0, sticky="w")
+        if advertencia_escala:
+            ttk.Label(cont, text=advertencia_escala, foreground="#b9770e").grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         frame_text = ttk.LabelFrame(cont, text="Detalle respuesta IA")
-        frame_text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        frame_text.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
         frame_text.rowconfigure(0, weight=1)
         frame_text.columnconfigure(0, weight=1)
 
@@ -6186,6 +6285,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
             for id_foto in seleccionadas
             if self._deteccion_resultados.get(id_foto) and self._deteccion_resultados[id_foto].valid_for_next_step
         )
+        patrones_no_detectados = sum(
+            1
+            for id_foto in seleccionadas
+            if id_foto in self._deteccion_resultados and not self._deteccion_resultados[id_foto].valid_for_next_step
+        )
         frutos_validos = 0
         fotos_analizadas = 0
         for id_foto in seleccionadas:
@@ -6196,7 +6300,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             frutos_validos += len([item for item in res.fruits if item.valid])
         self.resumen_global_var.set(
             f"Fotos encontradas: {total_fotos} | Fotos seleccionadas: {total_seleccionadas} | "
-            f"Fotos aptas IA: {aptas_ia} | Fotos patrón válido: {patrones_validos} | Fotos analizadas: {fotos_analizadas} | "
+            f"Fotos aptas IA: {aptas_ia} | Fotos patrón válido: {patrones_validos} | Fotos sin patrón: {patrones_no_detectados} | "
+            f"Fotos analizadas: {fotos_analizadas} | "
             f"Frutos válidos: {frutos_validos}"
         )
         resultados_estimacion = self._get_estimacion_resultados_muestra_actual()
