@@ -50,6 +50,9 @@ FILTRO_CALIBRADOR_CAMPANA = "2026"
 FILTRO_CALIBRADOR_EMPRESA = "1"
 FILTRO_CALIBRADOR_CULTIVO = "CITRICOS"
 OPCION_BOLETA_COMPLETA = "Boleta completa"
+ESTADO_ESTIMACION_PREVIA = "ESTIMACION_PREVIA"
+ESTADO_VALIDADO = "VALIDADO_CON_CALIBRADOR"
+METODO_CONSOLIDACION_MEDIA_SIMPLE = "media_simple"
 
 
 def normalizar_distribucion_calibres(calibres_brutos: dict[str, float]) -> dict[str, float]:
@@ -629,7 +632,12 @@ class CalibresIAHistoryRepository:
                         advertencias_ia TEXT,
                         resumen_ia TEXT,
                         output_ia_json TEXT,
-                        observaciones TEXT
+                        observaciones TEXT,
+                        estado_registro TEXT,
+                        fecha_estimacion TEXT,
+                        fecha_validacion TEXT,
+                        id_muestreo TEXT,
+                        metodo_consolidacion TEXT
                     )
                     """
                 )
@@ -645,6 +653,11 @@ class CalibresIAHistoryRepository:
                 self.ensure_column_exists(conn, "comparaciones_calibres", "variedad", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "prompt_version", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "prompt_source", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "estado_registro", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "fecha_estimacion", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "fecha_validacion", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "id_muestreo", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "metodo_consolidacion", "TEXT")
                 conn.execute("DROP INDEX IF EXISTS ux_comp_calibres_dedupe")
                 conn.commit()
             db_exists_after = os.path.exists(self.db_path)
@@ -699,6 +712,11 @@ class CalibresIAHistoryRepository:
             "resumen_ia",
             "output_ia_json",
             "observaciones",
+            "estado_registro",
+            "fecha_estimacion",
+            "fecha_validacion",
+            "id_muestreo",
+            "metodo_consolidacion",
         ]
         placeholders = ", ".join(["?"] * len(columns))
         sql = f"INSERT INTO comparaciones_calibres ({', '.join(columns)}) VALUES ({placeholders})"
@@ -708,6 +726,58 @@ class CalibresIAHistoryRepository:
             conn.executemany(sql, payload)
             conn.commit()
             return len(rows)
+
+    def count_existing_pre_estimations(self, id_foto: str, prompt_version: str) -> int:
+        self.ensure_schema()
+        sql = """
+            SELECT COUNT(*) AS total
+            FROM comparaciones_calibres
+            WHERE COALESCE(id_foto, '') = ?
+              AND COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') = ?
+              AND COALESCE(NULLIF(TRIM(estado_registro), ''), ?) = ?
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            row = conn.execute(sql, (id_foto, prompt_version, ESTADO_VALIDADO, ESTADO_ESTIMACION_PREVIA)).fetchone()
+        return int((row["total"] if row else 0) or 0)
+
+    @staticmethod
+    def _estado_sql_expr() -> str:
+        return f"COALESCE(NULLIF(TRIM(estado_registro), ''), CASE WHEN error_absoluto_medio IS NOT NULL THEN '{ESTADO_VALIDADO}' ELSE '' END)"
+
+    def validate_pre_estimation(self, comparison_id: int, payload: dict[str, Any]) -> bool:
+        self.ensure_schema()
+        set_cols = [
+            "albaran",
+            "tipo_comparacion",
+            "campana",
+            "empresa",
+            "socio",
+            "id_socio",
+            "neto",
+            "calibre_dominante_real",
+            "error_absoluto_medio",
+            "error_total_absoluto",
+            "podrido",
+            "deslinea",
+            "desmesa",
+            "destrio_total",
+            "suma_calibres_real",
+            "fecha_validacion",
+            "estado_registro",
+        ]
+        set_cols.extend([f"real_norm_cal{idx}" for idx in range(10)])
+        set_cols.extend([f"real_bruto_cal{idx}" for idx in range(10)])
+        sql_set = ", ".join([f"{col} = ?" for col in set_cols])
+        sql = f"UPDATE comparaciones_calibres SET {sql_set} WHERE id = ?"
+        params = [payload.get(col) for col in set_cols]
+        params.append(int(comparison_id))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount > 0
 
     def _connect_readonly(self) -> sqlite3.Connection:
         parent_dir, parent_exists = self._validate_parent_dir_exists()
@@ -739,6 +809,7 @@ class CalibresIAHistoryRepository:
         cultivo: str = "",
         calidad: str = "",
         prompt_version: str = "",
+        estado_registro: str = "",
     ) -> tuple[list[str], list[Any]]:
         filtros_sql: list[str] = []
         params: list[Any] = []
@@ -771,6 +842,10 @@ class CalibresIAHistoryRepository:
         if version_limpia and version_limpia.upper() != "TODAS":
             filtros_sql.append("COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') = ?")
             params.append(version_limpia)
+        estado_limpio = estado_registro.strip().upper()
+        if estado_limpio and estado_limpio != "TODAS":
+            filtros_sql.append(f"{CalibresIAHistoryRepository._estado_sql_expr()} = ?")
+            params.append(estado_limpio)
         return filtros_sql, params
 
     def list_comparisons(
@@ -782,6 +857,7 @@ class CalibresIAHistoryRepository:
         cultivo: str = "",
         calidad: str = "",
         prompt_version: str = "",
+        estado_registro: str = "",
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         self.ensure_schema()
@@ -792,7 +868,9 @@ class CalibresIAHistoryRepository:
             cultivo=cultivo,
             calidad=calidad,
             prompt_version=prompt_version,
+            estado_registro=estado_registro,
         )
+        filtros_sql.append(f"{self._estado_sql_expr()} = '{ESTADO_VALIDADO}'")
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
             SELECT
@@ -806,12 +884,14 @@ class CalibresIAHistoryRepository:
                 modelo_ia,
                 COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS prompt_version,
                 COALESCE(NULLIF(TRIM(prompt_source), ''), 'no_informado') AS prompt_source,
+                {self._estado_sql_expr()} AS estado_registro,
                 confianza_ia,
                 calibre_dominante_ia,
                 calibre_dominante_real,
                 error_absoluto_medio,
                 error_total_absoluto,
                 CASE
+                    WHEN {self._estado_sql_expr()} = '{ESTADO_ESTIMACION_PREVIA}' THEN 'PENDIENTE'
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 10 THEN 'ACEPTABLE'
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
@@ -839,6 +919,7 @@ class CalibresIAHistoryRepository:
         cultivo: str = "",
         calidad: str = "",
         prompt_version: str = "",
+        estado_registro: str = "",
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         self.ensure_schema()
@@ -849,6 +930,7 @@ class CalibresIAHistoryRepository:
             cultivo=cultivo,
             calidad=calidad,
             prompt_version=prompt_version,
+            estado_registro=estado_registro,
         )
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
@@ -863,12 +945,14 @@ class CalibresIAHistoryRepository:
                 modelo_ia,
                 COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS prompt_version,
                 COALESCE(NULLIF(TRIM(prompt_source), ''), 'no_informado') AS prompt_source,
+                {self._estado_sql_expr()} AS estado_registro,
                 confianza_ia,
                 calibre_dominante_ia,
                 calibre_dominante_real,
                 error_absoluto_medio,
                 error_total_absoluto,
                 CASE
+                    WHEN {self._estado_sql_expr()} = '{ESTADO_ESTIMACION_PREVIA}' THEN 'PENDIENTE'
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 10 THEN 'ACEPTABLE'
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 15 THEN 'MALA'
@@ -924,6 +1008,7 @@ class CalibresIAHistoryRepository:
             calidad=calidad,
             prompt_version=prompt_version,
         )
+        filtros_sql.append(f"{self._estado_sql_expr()} = '{ESTADO_VALIDADO}'")
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql_base = f"""
             SELECT
@@ -1122,6 +1207,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         self.history_repo = history_repo
         self._current_rows: dict[str, int] = {}
         self._current_rows_data: list[dict[str, Any]] = []
+        self._current_rows_lookup: dict[int, dict[str, Any]] = {}
         self._ultimo_texto_sesgo: str = "Sin registros para calcular sesgo por calibre."
 
         self.boleta_var = tk.StringVar()
@@ -1130,6 +1216,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         self.cultivo_var = tk.StringVar()
         self.calidad_var = tk.StringVar(value="TODAS")
         self.prompt_version_var = tk.StringVar(value="TODAS")
+        self.estado_registro_var = tk.StringVar(value="TODAS")
         self.estado_var = tk.StringVar(value=f"Origen DB: {self.history_repo.db_path}")
         self.resumen_var = tk.StringVar(
             value=(
@@ -1157,8 +1244,8 @@ class CalibresIAHistoryWindow(tk.Toplevel):
 
         filtros = ttk.LabelFrame(container, text="Filtros", padding=8)
         filtros.grid(row=0, column=0, sticky="ew")
-        for col in range(12):
-            filtros.columnconfigure(col, weight=1 if col in {1, 3, 5, 7, 9, 11} else 0)
+        for col in range(14):
+            filtros.columnconfigure(col, weight=1 if col in {1, 3, 5, 7, 9, 11, 13} else 0)
 
         ttk.Label(filtros, text="Boleta:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
         ttk.Entry(filtros, textvariable=self.boleta_var).grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=2)
@@ -1185,8 +1272,16 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             width=18,
         )
         self.combo_prompt_version.grid(row=0, column=11, sticky="ew", padx=(0, 10), pady=2)
+        ttk.Label(filtros, text="Estado:").grid(row=0, column=12, sticky="w", padx=(0, 6), pady=2)
+        ttk.Combobox(
+            filtros,
+            textvariable=self.estado_registro_var,
+            state="readonly",
+            values=("TODAS", ESTADO_ESTIMACION_PREVIA, ESTADO_VALIDADO),
+            width=24,
+        ).grid(row=0, column=13, sticky="ew", padx=(0, 10), pady=2)
         ttk.Button(filtros, text="Buscar histórico", command=self._buscar_historico).grid(
-            row=1, column=11, sticky="e", pady=(8, 0)
+            row=1, column=13, sticky="e", pady=(8, 0)
         )
 
         ttk.Label(container, textvariable=self.estado_var, foreground="#34495e").grid(row=1, column=0, sticky="ew", pady=(8, 3))
@@ -1208,6 +1303,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "modelo_ia",
             "prompt_version",
             "prompt_source",
+            "estado_registro",
             "confianza_ia",
             "calibre_dominante_ia",
             "calibre_dominante_real",
@@ -1225,6 +1321,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "modelo_ia": "Modelo IA",
             "prompt_version": "Prompt ver.",
             "prompt_source": "Prompt source",
+            "estado_registro": "Estado",
             "confianza_ia": "Confianza",
             "calibre_dominante_ia": "Dominante IA",
             "calibre_dominante_real": "Dominante real",
@@ -1241,6 +1338,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "modelo_ia": 150,
             "prompt_version": 140,
             "prompt_source": 140,
+            "estado_registro": 210,
             "confianza_ia": 85,
             "calibre_dominante_ia": 120,
             "calibre_dominante_real": 120,
@@ -1253,12 +1351,20 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             self.tree_historial.column(col, width=widths[col], anchor="w")
         self.tree_historial.grid(row=0, column=0, sticky="nsew")
         self.tree_historial.bind("<Double-1>", self._on_double_click_historial)
+        self.tree_historial.bind("<<TreeviewSelect>>", self._on_select_historial)
 
         scroll_y = ttk.Scrollbar(frame_tabla, orient="vertical", command=self.tree_historial.yview)
         scroll_y.grid(row=0, column=1, sticky="ns")
         scroll_x = ttk.Scrollbar(frame_tabla, orient="horizontal", command=self.tree_historial.xview)
         scroll_x.grid(row=1, column=0, sticky="ew")
         self.tree_historial.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        self.btn_validar_estimacion_previa = ttk.Button(
+            frame_tabla,
+            text="✅ Validar estimación previa",
+            command=self._validar_estimacion_previa_seleccionada,
+            state="disabled",
+        )
+        self.btn_validar_estimacion_previa.grid(row=2, column=0, sticky="e", pady=(6, 0))
 
         frame_sesgo = ttk.LabelFrame(container, text="Análisis de sesgo por calibre", padding=6)
         frame_sesgo.grid(row=4, column=0, sticky="ew", pady=(8, 0))
@@ -1330,6 +1436,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             self.tree_historial.delete(item)
         self._current_rows.clear()
         self._current_rows_data = []
+        self._current_rows_lookup = {}
         self._limpiar_panel_sesgo()
 
         filtros = {
@@ -1339,6 +1446,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "cultivo": self.cultivo_var.get().strip(),
             "calidad": "" if self.calidad_var.get() == "TODAS" else self.calidad_var.get().strip(),
             "prompt_version": self.prompt_version_var.get().strip(),
+            "estado_registro": self.estado_registro_var.get().strip(),
         }
 
         def worker() -> None:
@@ -1370,7 +1478,9 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             self.estado_var.set(f"Consulta OK. Registros cargados: {len(rows)}.")
         for row in rows:
             item_id = f"hist_{row.get('id')}"
-            self._current_rows[item_id] = int(row.get("id") or 0)
+            row_id = int(row.get("id") or 0)
+            self._current_rows[item_id] = row_id
+            self._current_rows_lookup[row_id] = row
             self.tree_historial.insert(
                 "",
                 "end",
@@ -1384,19 +1494,27 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                     row.get("modelo_ia", "-"),
                     row.get("prompt_version", "sin_version"),
                     row.get("prompt_source", "no_informado"),
+                    row.get("estado_registro", "-"),
                     self._fmt_number(row.get("confianza_ia")),
                     row.get("calibre_dominante_ia", "-"),
                     row.get("calibre_dominante_real", "-"),
-                    self._fmt_number(row.get("error_absoluto_medio")),
+                    "pendiente"
+                    if str(row.get("estado_registro", "")).strip().upper() == ESTADO_ESTIMACION_PREVIA
+                    else self._fmt_number(row.get("error_absoluto_medio")),
                     self._fmt_number(row.get("error_total_absoluto")),
                     row.get("calidad", clasificar_calidad_error(row.get("error_absoluto_medio"))),
                 ),
             )
+        total_pendientes = sum(
+            1 for row in rows if str(row.get("estado_registro", "")).strip().upper() == ESTADO_ESTIMACION_PREVIA
+        )
+        total_validados = sum(1 for row in rows if str(row.get("estado_registro", "")).strip().upper() == ESTADO_VALIDADO)
         self.resumen_var.set(
             "Registros={numero_registros} | Error medio global={error_medio_global} | "
             "Error total medio={error_total_medio} | Dominante IA frecuente={dominante_ia_mas_frecuente} | "
             "Dominante real frecuente={dominante_real_mas_frecuente} | BUENA={total_buena} | "
-            "ACEPTABLE={total_aceptable} | MALA={total_mala} | MUY_MALA={total_muy_mala}".format(
+            "ACEPTABLE={total_aceptable} | MALA={total_mala} | MUY_MALA={total_muy_mala} | "
+            "Previas pendientes={total_pendientes} | Validados={total_validados}".format(
                 numero_registros=summary.get("numero_registros", 0),
                 error_medio_global=self._fmt_number(summary.get("error_medio_global")),
                 error_total_medio=self._fmt_number(summary.get("error_total_medio")),
@@ -1406,10 +1524,13 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 total_aceptable=summary.get("total_aceptable", 0),
                 total_mala=summary.get("total_mala", 0),
                 total_muy_mala=summary.get("total_muy_mala", 0),
+                total_pendientes=total_pendientes,
+                total_validados=total_validados,
             )
         )
         analisis_sesgo = calcular_sesgo_por_calibre(rows)
         self._current_rows_data = rows
+        self._on_select_historial()
         self._render_sesgo(analisis_sesgo)
         self._render_summary_version(summary_by_version)
 
@@ -1515,6 +1636,107 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             return f"{float(value):.2f}"
         except (TypeError, ValueError):
             return "-"
+
+    def _on_select_historial(self, _event: tk.Event | None = None) -> None:
+        selected = self.tree_historial.selection()
+        enabled = False
+        if selected:
+            comparison_id = self._current_rows.get(selected[0], 0)
+            row = self._current_rows_lookup.get(int(comparison_id or 0), {})
+            estado = str(row.get("estado_registro", "") or "").strip().upper()
+            enabled = estado == ESTADO_ESTIMACION_PREVIA
+        self.btn_validar_estimacion_previa.config(state="normal" if enabled else "disabled")
+
+    def _validar_estimacion_previa_seleccionada(self) -> None:
+        selected = self.tree_historial.selection()
+        if not selected:
+            messagebox.showinfo("Histórico IA", "Seleccione una estimación previa para validar.", parent=self)
+            return
+        comparison_id = int(self._current_rows.get(selected[0], 0) or 0)
+        row = self._current_rows_lookup.get(comparison_id, {})
+        if str(row.get("estado_registro", "")).strip().upper() != ESTADO_ESTIMACION_PREVIA:
+            messagebox.showwarning("Histórico IA", "Solo puede validar filas en estado ESTIMACION_PREVIA.", parent=self)
+            return
+        boleta = str(row.get("boleta", "") or "").strip()
+        if not boleta:
+            messagebox.showerror("Histórico IA", "La fila no tiene boleta asociada para validar.", parent=self)
+            return
+
+        try:
+            entregas = listar_entregas_por_boleta(DB_FRUTA_PATH, boleta)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Histórico IA", f"No se pudieron cargar entregas de calibrador:\n{exc}", parent=self)
+            return
+        if not entregas:
+            messagebox.showwarning("Histórico IA", f"No hay entregas de calibrador para boleta {boleta}.", parent=self)
+            return
+        opciones = [OPCION_BOLETA_COMPLETA]
+        for entrega in entregas:
+            texto = str(entrega.get("AlbaranDef") or entrega.get("Albaran") or entrega.get("Albaran2") or "").strip()
+            if texto:
+                opciones.append(texto)
+        seleccion = simpledialog.askstring(
+            "Validar estimación previa",
+            "Albarán a validar (vacío = boleta completa):\n" + "\n".join(opciones[:20]),
+            parent=self,
+        )
+        if seleccion is None:
+            return
+        seleccion_limpia = seleccion.strip()
+        try:
+            if not seleccion_limpia or seleccion_limpia.upper() == OPCION_BOLETA_COMPLETA.upper():
+                calibrador = cargar_calibrador_boleta_ponderado(entregas)
+                entrega_ctx = entregas[0]
+                albaran = OPCION_BOLETA_COMPLETA
+                tipo_comparacion = "boleta_completa_ponderada"
+            else:
+                entrega_ctx = next(
+                    (
+                        e for e in entregas
+                        if str(e.get("AlbaranDef") or e.get("Albaran") or e.get("Albaran2") or "").strip().upper()
+                        == seleccion_limpia.upper()
+                    ),
+                    None,
+                )
+                if not entrega_ctx:
+                    raise ValueError("El albarán indicado no existe en las entregas cargadas.")
+                calibrador = cargar_calibrador_por_entrega(entrega_ctx)
+                albaran = str(entrega_ctx.get("AlbaranDef") or entrega_ctx.get("Albaran") or entrega_ctx.get("Albaran2") or "").strip()
+                tipo_comparacion = "entrega"
+            real_norm = normalizar_distribucion_calibres(calibrador["calibres_brutos"])
+            dist_ia = {f"CAL {idx}": float(row.get(f"ia_cal{idx}") or 0.0) for idx in range(10)}
+            comp = comparar_distribuciones(dist_ia, real_norm)
+            payload: dict[str, Any] = {
+                "albaran": albaran,
+                "tipo_comparacion": tipo_comparacion,
+                "campana": ObtencionCalibresWindow._to_int_or_none(entrega_ctx.get("Campana")),
+                "empresa": ObtencionCalibresWindow._to_int_or_none(entrega_ctx.get("Empresa")),
+                "socio": str(entrega_ctx.get("Socio", "") or "").strip(),
+                "id_socio": ObtencionCalibresWindow._to_int_or_none(entrega_ctx.get("IdSocio")),
+                "neto": ObtencionCalibresWindow._to_float_or_none(entrega_ctx.get("Neto")),
+                "calibre_dominante_real": str(comp.get("calibre_dominante_real", "") or "").strip(),
+                "error_absoluto_medio": ObtencionCalibresWindow._to_float_or_none(comp.get("error_abs_medio")),
+                "error_total_absoluto": ObtencionCalibresWindow._to_float_or_none(comp.get("error_total_abs")),
+                "podrido": ObtencionCalibresWindow._to_float_or_none(calibrador.get("podrido")),
+                "deslinea": ObtencionCalibresWindow._to_float_or_none(calibrador.get("des_linea")),
+                "desmesa": ObtencionCalibresWindow._to_float_or_none(calibrador.get("des_mesa")),
+                "destrio_total": ObtencionCalibresWindow._to_float_or_none(calibrador.get("destrio_total")),
+                "suma_calibres_real": ObtencionCalibresWindow._to_float_or_none(calibrador.get("suma_calibres")),
+                "fecha_validacion": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "estado_registro": ESTADO_VALIDADO,
+            }
+            for idx in range(10):
+                cal = f"CAL {idx}"
+                payload[f"real_norm_cal{idx}"] = real_norm.get(cal, 0.0)
+                payload[f"real_bruto_cal{idx}"] = calibrador.get("calibres_brutos", {}).get(cal, 0.0)
+            ok = self.history_repo.validate_pre_estimation(comparison_id, payload)
+            if not ok:
+                raise LookupError("No se pudo actualizar la fila seleccionada.")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Histórico IA", f"No se pudo validar la estimación previa:\n{exc}", parent=self)
+            return
+        self._buscar_historico()
+        messagebox.showinfo("Histórico IA", "Estimación previa validada correctamente.", parent=self)
 
     def _on_double_click_historial(self, _event: tk.Event) -> None:
         selected = self.tree_historial.selection()
@@ -1797,24 +2019,30 @@ class ObtencionCalibresWindow(BaseToolWindow):
             command=self._ver_detalle_estimacion_ia_seleccionada,
         )
         self.btn_ver_detalle_estimacion_ia.grid(row=0, column=4, padx=(0, 6))
+        self.btn_guardar_estimacion_previa = ttk.Button(
+            toolbar_ia,
+            text="💾 Guardar estimación previa",
+            command=self._guardar_estimacion_previa,
+        )
+        self.btn_guardar_estimacion_previa.grid(row=0, column=5, padx=(0, 6))
         self.btn_comparar_calibrador = ttk.Button(
             toolbar_ia,
             text="📊 Comparar IA vs calibrador",
             command=self._comparar_ia_vs_calibrador,
         )
-        self.btn_comparar_calibrador.grid(row=0, column=5, padx=(0, 6))
+        self.btn_comparar_calibrador.grid(row=0, column=6, padx=(0, 6))
         self.btn_guardar_historico = ttk.Button(
             toolbar_ia,
             text="💾 Guardar comparación histórico",
             command=self._guardar_comparacion_historico,
         )
-        self.btn_guardar_historico.grid(row=0, column=6, padx=(0, 6))
+        self.btn_guardar_historico.grid(row=0, column=7, padx=(0, 6))
         self.btn_ver_historico_ia = ttk.Button(
             toolbar_ia,
             text="📚 Ver histórico IA",
             command=self._abrir_panel_historico_ia,
         )
-        self.btn_ver_historico_ia.grid(row=0, column=7, padx=(0, 6))
+        self.btn_ver_historico_ia.grid(row=0, column=8, padx=(0, 6))
 
         ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
         ia_frame.grid(row=1, column=0, sticky="nsew")
@@ -3553,6 +3781,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "resumen_ia": str(estimacion.get("resumen", "") or "").strip(),
             "output_ia_json": output_json_text,
             "observaciones": str(estimacion.get("diagnostico", "") or "").strip(),
+            "estado_registro": ESTADO_VALIDADO,
+            "fecha_estimacion": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "fecha_validacion": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "id_muestreo": str(self._current_muestra_id or "").strip() or None,
+            "metodo_consolidacion": METODO_CONSOLIDACION_MEDIA_SIMPLE,
         }
         for idx in range(10):
             calibre = f"CAL {idx}"
@@ -3560,6 +3793,104 @@ class ObtencionCalibresWindow(BaseToolWindow):
             row[f"real_norm_cal{idx}"] = real_norm.get(calibre, 0.0)
             row[f"real_bruto_cal{idx}"] = calibrador.get("calibres_brutos", {}).get(calibre, 0.0)
         return row
+
+    def _build_estimacion_previa_row(self, id_foto: str, estimacion: dict[str, Any]) -> dict[str, Any]:
+        boleta = self._get_boleta_actual()
+        card = next((item for item in self._current_cards if str(item.get("foto", {}).get("id_foto", "")) == id_foto), {})
+        foto = card.get("foto", {}) if isinstance(card, dict) else {}
+        raw_result = estimacion.get("raw_result", {})
+        prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or PROMPT_VERSION
+        prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
+        output_json = estimacion.get("json_parseado")
+        output_json_text = json.dumps(output_json, ensure_ascii=False) if isinstance(output_json, dict) else str(
+            estimacion.get("output_text_original", "") or ""
+        )
+        advertencias = estimacion.get("advertencias", [])
+        advertencias_texto = " | ".join(str(item).strip() for item in advertencias if str(item).strip())
+        distribucion_foto = self._normalizar_distribucion_por_foto(estimacion.get("distribucion", []))
+        dominante_ia = max(distribucion_foto.items(), key=lambda item: item[1])[0] if distribucion_foto else ""
+        row: dict[str, Any] = {
+            "fecha_registro": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "fecha_estimacion": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "boleta": self._to_int_or_none(boleta),
+            "albaran": None,
+            "tipo_comparacion": None,
+            "campana": None,
+            "empresa": None,
+            "cultivo": self._normalizar_campo_ia(raw_result.get("cultivo", "")),
+            "variedad": self._normalizar_campo_ia(raw_result.get("variedad", "")),
+            "socio": None,
+            "id_socio": None,
+            "neto": None,
+            "id_foto": id_foto,
+            "image_url": str(estimacion.get("image_url", "") or "").strip(),
+            "ruta_local": str(foto.get("ruta_local", "") or "").strip(),
+            "modelo_ia": str(raw_result.get("model", "") or "").strip() or "desconocido",
+            "prompt_version": prompt_version,
+            "prompt_source": prompt_source,
+            "confianza_ia": self._to_float_or_none(estimacion.get("confianza")),
+            "calibre_dominante_ia": dominante_ia,
+            "calibre_dominante_real": None,
+            "error_absoluto_medio": None,
+            "error_total_absoluto": None,
+            "podrido": None,
+            "deslinea": None,
+            "desmesa": None,
+            "destrio_total": None,
+            "suma_calibres_real": None,
+            "advertencias_ia": advertencias_texto,
+            "resumen_ia": str(estimacion.get("resumen", "") or "").strip(),
+            "output_ia_json": output_json_text,
+            "observaciones": str(estimacion.get("diagnostico", "") or "").strip(),
+            "estado_registro": ESTADO_ESTIMACION_PREVIA,
+            "fecha_validacion": None,
+            "id_muestreo": str(self._current_muestra_id or "").strip() or None,
+            "metodo_consolidacion": METODO_CONSOLIDACION_MEDIA_SIMPLE,
+        }
+        for idx in range(10):
+            calibre = f"CAL {idx}"
+            row[f"ia_cal{idx}"] = distribucion_foto.get(calibre, 0.0)
+            row[f"real_norm_cal{idx}"] = None
+            row[f"real_bruto_cal{idx}"] = None
+        return row
+
+    def _guardar_estimacion_previa(self) -> None:
+        resultados = self._get_estimacion_resultados_muestra_actual()
+        if not resultados:
+            messagebox.showwarning("Obtención calibres", "No hay estimaciones IA para guardar.", parent=self)
+            return
+        rows: list[dict[str, Any]] = []
+        for id_foto, estimacion in resultados.items():
+            if estimacion.get("error") or estimacion.get("apta_para_estimacion") != "Sí":
+                continue
+            distribucion = estimacion.get("distribucion", [])
+            if not isinstance(distribucion, list) or not distribucion:
+                continue
+            row = self._build_estimacion_previa_row(id_foto, estimacion)
+            existente = self.history_repo.count_existing_pre_estimations(
+                id_foto=id_foto,
+                prompt_version=str(row.get("prompt_version", "sin_version") or "sin_version"),
+            )
+            if existente > 0:
+                confirmar = messagebox.askyesno(
+                    "Obtención calibres",
+                    f"Ya existe una estimación previa para foto {id_foto} con prompt {row['prompt_version']}.\n"
+                    "¿Guardar nueva versión igualmente?",
+                    parent=self,
+                )
+                if not confirmar:
+                    continue
+            rows.append(row)
+        if not rows:
+            messagebox.showinfo("Obtención calibres", "No hay filas aptas para guardar como estimación previa.", parent=self)
+            return
+        try:
+            saved = self.history_repo.save_comparison(rows)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Obtención calibres", f"No se pudo guardar estimación previa:\n{exc}", parent=self)
+            return
+        self.estado_var.set(f"Estimación previa guardada ({saved} filas).")
+        messagebox.showinfo("Obtención calibres", f"Estimaciones previas guardadas: {saved}.", parent=self)
 
     def _guardar_comparacion_historico(self) -> None:
         if self._ai_estimacion_en_curso or self._ai_lote_en_curso or self._ai_validacion_en_curso:
@@ -3705,6 +4036,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_usar_solo_aptas_ia,
             self.btn_estimacion_calibres_ia,
             self.btn_ver_detalle_estimacion_ia,
+            self.btn_guardar_estimacion_previa,
             self.btn_comparar_calibrador,
             self.btn_guardar_historico,
             self.btn_ver_historico_ia,
@@ -3729,10 +4061,14 @@ class ObtencionCalibresWindow(BaseToolWindow):
         aptas = 0
         conf_values: list[float] = []
         advertencias: list[str] = []
-        consolidado: dict[str, float] = {}
+        consolidado: dict[str, float] = {f"CAL {idx}": 0.0 for idx in range(10)}
         count_distribucion = 0
         ultimo_prompt_ctx = "IA: cultivo=- | variedad=- | prompt=- | source=-"
         avisos_prompt: list[str] = []
+        prompt_version_counts: dict[str, int] = {}
+        prompt_source_values: list[str] = []
+        hubo_fallback_internal = False
+        sin_prompt_especifico = False
 
         for id_foto in sorted(resultados.keys()):
             row = resultados[id_foto]
@@ -3745,7 +4081,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     for item in row.get("distribucion", []):
                         calibre = str(item.get("calibre", "")).strip()
                         pct = self._confianza_a_float(item.get("porcentaje"))
-                        if calibre and pct is not None:
+                        if calibre in consolidado and pct is not None:
                             consolidado[calibre] = consolidado.get(calibre, 0.0) + pct
                     count_distribucion += 1
                 for advertencia in row.get("advertencias", []):
@@ -3779,12 +4115,17 @@ class ObtencionCalibresWindow(BaseToolWindow):
             variedad_ia = self._normalizar_campo_ia(raw_result.get("variedad", ""))
             prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or "-"
             prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
+            prompt_version_counts[prompt_version] = prompt_version_counts.get(prompt_version, 0) + 1
+            prompt_source_values.append(prompt_source)
             ultimo_prompt_ctx = (
                 f"IA: cultivo={cultivo_ia} | variedad={variedad_ia} | prompt={prompt_version} | source={prompt_source}"
             )
+            if prompt_source == "fallback_internal":
+                hubo_fallback_internal = True
             if variedad_ia == "*":
                 avisos_prompt.append("No se pudo determinar la variedad. Se usará prompt genérico.")
             if prompt_source in {"sqlite_cultivo", "sqlite_generico"}:
+                sin_prompt_especifico = True
                 avisos_prompt.append("No existe prompt específico para esta variedad. Se ha usado un prompt genérico.")
                 if cultivo_ia != "*":
                     avisos_prompt.append(
@@ -3794,6 +4135,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         confianza_media = f"{(sum(conf_values) / len(conf_values)):.2f}" if conf_values else "-"
         consolidado_texto = "-"
+        dominante_consolidado = "-"
         if consolidado and count_distribucion > 0:
             promedio = {k: v / count_distribucion for k, v in consolidado.items()}
             total_prom = sum(promedio.values())
@@ -3801,10 +4143,19 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 norm = {k: (v * 100.0 / total_prom) for k, v in promedio.items()}
                 partes = [f"{k}:{norm[k]:.1f}%" for k in sorted(norm.keys())]
                 consolidado_texto = " | ".join(partes)
+                dominante_consolidado = max(norm.items(), key=lambda item: item[1])[0]
+        prompt_version_dominante = "-"
+        if prompt_version_counts:
+            prompt_version_dominante = max(prompt_version_counts.items(), key=lambda item: item[1])[0]
+        prompt_source_unico = prompt_source_values[0] if prompt_source_values else "-"
+        if len(set(prompt_source_values)) > 1:
+            prompt_source_unico = "mixto"
         self.resumen_estimacion_ia_var.set(
-            "Estimación IA experimental: "
-            f"evaluadas={len(resultados)} | aptas={aptas} | confianza media={confianza_media} | "
-            f"distribución consolidada={consolidado_texto}"
+            "Resultado consolidado del muestreo: "
+            f"fotos estimadas={len(resultados)} | fotos aptas={aptas} | "
+            f"distribución CAL0..CAL9={consolidado_texto} | dominante={dominante_consolidado} | "
+            f"confianza media={confianza_media} | prompt_version dominante={prompt_version_dominante} | "
+            f"prompt_source={prompt_source_unico} | Método de consolidación: media simple"
         )
         advertencias_unicas = []
         for adv in advertencias:
@@ -3819,6 +4170,25 @@ class ObtencionCalibresWindow(BaseToolWindow):
         for aviso in avisos_prompt:
             if aviso not in avisos_unicos:
                 avisos_unicos.append(aviso)
+        if prompt_source_values and any(src != "sqlite_exact" for src in prompt_source_values):
+            avisos_unicos.append("Algunas fotos no usan prompt_source=sqlite_exact.")
+        if aptas < 3:
+            avisos_unicos.append("Hay menos de 3 fotos aptas para consolidación.")
+        conf_media_num = self._confianza_a_float(confianza_media)
+        if conf_media_num is not None and conf_media_num < 70.0:
+            avisos_unicos.append("La confianza media del muestreo es inferior a 70.")
+        if hubo_fallback_internal:
+            avisos_unicos.append("Al menos una foto usó fallback_internal.")
+        if sin_prompt_especifico:
+            avisos_unicos.append("No hay prompt específico para alguna variedad en el muestreo.")
+        boleta_actual = self._get_boleta_actual()
+        if boleta_actual:
+            try:
+                hay_hist = bool(self.history_repo.list_comparisons(boleta=boleta_actual.strip(), limit=1))
+            except Exception:
+                hay_hist = True
+            if not hay_hist:
+                avisos_unicos.append("No hay histórico previo para la boleta actual.")
         self.ia_aviso_prompt_var.set("Aviso IA: " + (" | ".join(avisos_unicos[:3]) if avisos_unicos else "-"))
         self._actualizar_resumen_global()
 
