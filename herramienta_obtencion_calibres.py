@@ -99,6 +99,62 @@ def comparar_distribuciones(
     }
 
 
+def calcular_consolidado_muestreo(registros_fotos: list[dict[str, Any]]) -> dict[str, Any]:
+    """Consolida resultados IA por id_muestreo usando media simple en CAL0..CAL9."""
+    total_fotos = len(registros_fotos)
+    acumulado = {f"CAL {idx}": 0.0 for idx in range(10)}
+    fotos_aptas = 0
+    confianzas: list[float] = []
+    prompt_version_counts: dict[str, int] = {}
+    prompt_source_counts: dict[str, int] = {}
+
+    for row in registros_fotos:
+        suma_foto = 0.0
+        for idx in range(10):
+            valor = max(0.0, float(row.get(f"ia_cal{idx}") or 0.0))
+            acumulado[f"CAL {idx}"] += valor
+            suma_foto += valor
+        if suma_foto > 0:
+            fotos_aptas += 1
+        conf = row.get("confianza_ia")
+        try:
+            if conf is not None:
+                confianzas.append(float(conf))
+        except (TypeError, ValueError):
+            pass
+        prompt_version = str(row.get("prompt_version", "") or "").strip() or "sin_version"
+        prompt_source = str(row.get("prompt_source", "") or "").strip() or "no_informado"
+        prompt_version_counts[prompt_version] = prompt_version_counts.get(prompt_version, 0) + 1
+        prompt_source_counts[prompt_source] = prompt_source_counts.get(prompt_source, 0) + 1
+
+    distribucion_promedio = {cal: (valor / total_fotos if total_fotos > 0 else 0.0) for cal, valor in acumulado.items()}
+    suma_promedio = sum(distribucion_promedio.values())
+    distribucion_normalizada = (
+        {cal: (valor * 100.0 / suma_promedio) for cal, valor in distribucion_promedio.items()}
+        if suma_promedio > 0
+        else {f"CAL {idx}": 0.0 for idx in range(10)}
+    )
+    dominante = max(distribucion_normalizada.items(), key=lambda item: item[1])[0] if suma_promedio > 0 else "-"
+    confianza_media = (sum(confianzas) / len(confianzas)) if confianzas else None
+    prompt_version_dominante = (
+        max(prompt_version_counts.items(), key=lambda item: item[1])[0] if prompt_version_counts else "sin_version"
+    )
+    prompt_source_dominante = (
+        max(prompt_source_counts.items(), key=lambda item: item[1])[0] if prompt_source_counts else "no_informado"
+    )
+
+    return {
+        "numero_fotos": total_fotos,
+        "numero_fotos_aptas": fotos_aptas,
+        "distribucion_consolidada": distribucion_normalizada,
+        "calibre_dominante_consolidado": dominante,
+        "confianza_media": confianza_media,
+        "prompt_version_dominante": prompt_version_dominante,
+        "prompt_source_dominante": prompt_source_dominante,
+        "metodo_consolidacion": METODO_CONSOLIDACION_MEDIA_SIMPLE,
+    }
+
+
 def clasificar_calidad_error(error_abs_medio: float) -> str:
     """Clasifica la calidad de comparación usando error absoluto medio."""
     try:
@@ -319,6 +375,8 @@ def listar_entregas_por_boleta(
     campana: str | None = FILTRO_CALIBRADOR_CAMPANA,
     empresa: str | None = FILTRO_CALIBRADOR_EMPRESA,
     cultivo: str | None = FILTRO_CALIBRADOR_CULTIVO,
+    *,
+    filtros_estrictos: bool = True,
 ) -> list[dict[str, Any]]:
     boleta_norm = str(boleta or "").strip()
     if not boleta_norm:
@@ -362,20 +420,23 @@ def listar_entregas_por_boleta(
             COALESCE("%Cal9", 0) AS Cal9
         FROM PesosFres
         WHERE TRIM(COALESCE(Boleta, '')) = ?
-          AND (TRIM(COALESCE(CAMPAÑA, '')) = ? OR ? = '')
-          AND (TRIM(COALESCE(EMPRESA, '')) = ? OR ? = '')
-          AND (UPPER(TRIM(COALESCE(CULTIVO, ''))) = ? OR ? = '')
+          AND (? = 0 OR TRIM(COALESCE(CAMPAÑA, '')) = ?)
+          AND (? = 0 OR TRIM(COALESCE(EMPRESA, '')) = ?)
+          AND (? = 0 OR UPPER(TRIM(COALESCE(CULTIVO, ''))) = ?)
         ORDER BY DATE(COALESCE(Fcarga, '')) ASC, TRIM(COALESCE(AlbaranDef, Albaran, '')) ASC
         """
+        usar_campana = 1 if filtros_estrictos and bool(campana_norm) else 0
+        usar_empresa = 1 if filtros_estrictos and bool(empresa_norm) else 0
+        usar_cultivo = 1 if filtros_estrictos and bool(cultivo_norm) else 0
         rows = conn.execute(
             sql,
             (
                 boleta_norm,
+                usar_campana,
                 campana_norm,
-                campana_norm,
+                usar_empresa,
                 empresa_norm,
-                empresa_norm,
-                cultivo_norm,
+                usar_cultivo,
                 cultivo_norm,
             ),
         ).fetchall()
@@ -656,7 +717,8 @@ class CalibresIAHistoryRepository:
                         fecha_estimacion TEXT,
                         fecha_validacion TEXT,
                         id_muestreo TEXT,
-                        metodo_consolidacion TEXT
+                        metodo_consolidacion TEXT,
+                        tipo_validacion TEXT
                     )
                     """
                 )
@@ -677,6 +739,7 @@ class CalibresIAHistoryRepository:
                 self.ensure_column_exists(conn, "comparaciones_calibres", "fecha_validacion", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "id_muestreo", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "metodo_consolidacion", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "tipo_validacion", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "albaran", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "estado_registro", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "error_absoluto_medio", "REAL")
@@ -744,6 +807,7 @@ class CalibresIAHistoryRepository:
             "fecha_validacion",
             "id_muestreo",
             "metodo_consolidacion",
+            "tipo_validacion",
         ]
         placeholders = ", ".join(["?"] * len(columns))
         sql = f"INSERT INTO comparaciones_calibres ({', '.join(columns)}) VALUES ({placeholders})"
@@ -787,10 +851,17 @@ class CalibresIAHistoryRepository:
         )
 
     def validate_pre_estimation(self, comparison_id: int, payload: dict[str, Any]) -> bool:
+        return self.validate_pre_estimations_batch([comparison_id], payload)
+
+    def validate_pre_estimations_batch(self, comparison_ids: list[int], payload: dict[str, Any]) -> bool:
         self.ensure_schema()
+        ids_limpios = sorted({int(item) for item in comparison_ids if int(item or 0) > 0})
+        if not ids_limpios:
+            return False
         set_cols = [
             "albaran",
             "tipo_comparacion",
+            "tipo_validacion",
             "campana",
             "empresa",
             "socio",
@@ -810,14 +881,39 @@ class CalibresIAHistoryRepository:
         set_cols.extend([f"real_norm_cal{idx}" for idx in range(10)])
         set_cols.extend([f"real_bruto_cal{idx}" for idx in range(10)])
         sql_set = ", ".join([f"{col} = ?" for col in set_cols])
-        sql = f"UPDATE comparaciones_calibres SET {sql_set} WHERE id = ?"
+        placeholders_ids = ", ".join(["?"] * len(ids_limpios))
+        sql = f"UPDATE comparaciones_calibres SET {sql_set} WHERE id IN ({placeholders_ids})"
         params = [payload.get(col) for col in set_cols]
-        params.append(int(comparison_id))
+        params.extend(ids_limpios)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("PRAGMA busy_timeout = 5000;")
             cur = conn.execute(sql, params)
             conn.commit()
             return cur.rowcount > 0
+
+    def get_pending_rows_for_muestreo(self, comparison_id: int, id_muestreo: str) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        id_muestreo_norm = str(id_muestreo or "").strip()
+        if not id_muestreo_norm:
+            row = self.get_comparison_detail(int(comparison_id))
+            if not row:
+                return []
+            if str(row.get("estado_registro", "")).strip().upper() != ESTADO_ESTIMACION_PREVIA:
+                return []
+            return [row]
+        sql = f"""
+            SELECT *
+            FROM comparaciones_calibres
+            WHERE COALESCE(NULLIF(TRIM(id_muestreo), ''), '') = ?
+              AND {self._estado_sql_expr()} = ?
+            ORDER BY datetime(fecha_registro) ASC, id ASC
+        """
+        try:
+            with self._connect_readonly() as conn:
+                rows = conn.execute(sql, (id_muestreo_norm, ESTADO_ESTIMACION_PREVIA)).fetchall()
+        except sqlite3.OperationalError as exc:
+            self._parse_tabla_no_existe(exc)
+        return [dict(row) for row in rows]
 
     def _connect_readonly(self) -> sqlite3.Connection:
         parent_dir, parent_exists = self._validate_parent_dir_exists()
@@ -931,6 +1027,7 @@ class CalibresIAHistoryRepository:
                 empresa,
                 variedad,
                 cultivo,
+                COALESCE(NULLIF(TRIM(id_muestreo), ''), '') AS id_muestreo,
                 id_foto,
                 modelo_ia,
                 COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS prompt_version,
@@ -1361,6 +1458,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "boleta",
             "albaran",
             "variedad",
+            "id_muestreo",
             "id_foto",
             "modelo_ia",
             "prompt_version",
@@ -1379,6 +1477,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "boleta": "Boleta",
             "albaran": "Albarán",
             "variedad": "Variedad",
+            "id_muestreo": "Id muestreo",
             "id_foto": "Id foto",
             "modelo_ia": "Modelo IA",
             "prompt_version": "Prompt ver.",
@@ -1396,6 +1495,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "boleta": 90,
             "albaran": 110,
             "variedad": 120,
+            "id_muestreo": 170,
             "id_foto": 190,
             "modelo_ia": 150,
             "prompt_version": 140,
@@ -1514,6 +1614,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         def worker() -> None:
             try:
                 rows = self.history_repo.list_comparisons(**filtros)
+                # TODO: Migrar análisis de sesgo/comparativa para operar por id_muestreo validado y evitar doble conteo por foto.
                 rows_sesgo = self.history_repo.list_comparisons_for_bias(**filtros)
                 summary = self.history_repo.get_summary(**filtros)
                 summary_by_version = self.history_repo.get_summary_by_version(**filtros)
@@ -1554,6 +1655,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                     row.get("boleta", "-"),
                     row.get("albaran", "-"),
                     row.get("variedad", "-"),
+                    row.get("id_muestreo", "-"),
                     row.get("id_foto", "-"),
                     row.get("modelo_ia", "-"),
                     row.get("prompt_version", "sin_version"),
@@ -1710,10 +1812,16 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         except (TypeError, ValueError):
             return "-"
 
-    def _seleccionar_entrega_para_validacion(self, entregas: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _seleccionar_entrega_para_validacion(
+        self,
+        entregas: list[dict[str, Any]],
+        *,
+        contexto: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
         class _SelectorAlbaranDialog(simpledialog.Dialog):
-            def __init__(self, parent: tk.Widget, opciones: list[dict[str, Any]]) -> None:
+            def __init__(self, parent: tk.Widget, opciones: list[dict[str, Any]], contexto_local: dict[str, str] | None) -> None:
                 self.opciones = opciones
+                self.contexto_local = contexto_local or {}
                 self.result: dict[str, Any] | None = None
                 super().__init__(parent, title="Seleccionar albarán real")
 
@@ -1723,6 +1831,19 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 ttk.Label(frame, text="Seleccione la entrega real para validar la estimación previa.").grid(
                     row=0, column=0, sticky="w", pady=(0, 6)
                 )
+                ttk.Label(
+                    frame,
+                    text=(
+                        "Contexto: "
+                        f"Boleta={self.contexto_local.get('boleta', '-')} | "
+                        f"Campaña={self.contexto_local.get('campana', '-')} | "
+                        f"Cultivo={self.contexto_local.get('cultivo', '-')} | "
+                        f"Empresa={self.contexto_local.get('empresa', '-')} | "
+                        f"Variedad={self.contexto_local.get('variedad', '-')}"
+                    ),
+                    foreground="#1f618d",
+                    wraplength=920,
+                ).grid(row=1, column=0, sticky="w", pady=(0, 6))
                 columnas = ("albaran", "fecha", "neto", "variedad")
                 self.tree = ttk.Treeview(frame, columns=columnas, show="headings", height=10)
                 self.tree.heading("albaran", text="Albarán")
@@ -1733,11 +1854,11 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 self.tree.column("fecha", width=120, anchor="w")
                 self.tree.column("neto", width=110, anchor="e")
                 self.tree.column("variedad", width=160, anchor="w")
-                self.tree.grid(row=1, column=0, sticky="nsew")
+                self.tree.grid(row=2, column=0, sticky="nsew")
                 scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-                scroll.grid(row=1, column=1, sticky="ns")
+                scroll.grid(row=2, column=1, sticky="ns")
                 self.tree.configure(yscrollcommand=scroll.set)
-                frame.rowconfigure(1, weight=1)
+                frame.rowconfigure(2, weight=1)
                 frame.columnconfigure(0, weight=1)
                 for idx, item in enumerate(self.opciones):
                     albaran = str(item.get("AlbaranDef") or item.get("Albaran") or item.get("Albaran2") or "").strip()
@@ -1764,7 +1885,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             def apply(self) -> None:
                 return
 
-        dialog = _SelectorAlbaranDialog(self, entregas)
+        dialog = _SelectorAlbaranDialog(self, entregas, contexto)
         return dialog.result
 
     def _on_select_historial(self, _event: tk.Event | None = None) -> None:
@@ -1776,6 +1897,21 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             estado = str(row.get("estado_registro", "") or "").strip().upper()
             enabled = estado == ESTADO_ESTIMACION_PREVIA
         self.btn_validar_estimacion_previa.config(state="normal" if enabled else "disabled")
+
+    def _resolver_contexto_filtros_albaran(self, row: dict[str, Any]) -> dict[str, str]:
+        campana_row = str(row.get("campana", "") or "").strip()
+        cultivo_row = str(row.get("cultivo", "") or "").strip()
+        empresa_row = str(row.get("empresa", "") or "").strip()
+        campana = campana_row or str(FILTRO_CALIBRADOR_CAMPANA or "").strip() or str(datetime.now(timezone.utc).year)
+        cultivo = cultivo_row or str(FILTRO_CALIBRADOR_CULTIVO or "").strip()
+        empresa = empresa_row or str(FILTRO_CALIBRADOR_EMPRESA or "").strip()
+        return {
+            "boleta": str(row.get("boleta", "") or "").strip(),
+            "campana": campana,
+            "cultivo": cultivo,
+            "empresa": empresa,
+            "variedad": str(row.get("variedad", "") or "").strip(),
+        }
 
     def _validar_estimacion_previa_seleccionada(self) -> None:
         selected = self.tree_historial.selection()
@@ -1792,9 +1928,11 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             messagebox.showerror("Histórico IA", "La fila no tiene boleta asociada para validar.", parent=self)
             return
 
-        cultivo = str(row.get("cultivo", "") or "").strip()
-        campana = str(row.get("campana", "") or "").strip()
-        empresa = str(row.get("empresa", "") or "").strip()
+        contexto_filtros = self._resolver_contexto_filtros_albaran(row)
+        campana = contexto_filtros["campana"]
+        cultivo = contexto_filtros["cultivo"]
+        empresa = contexto_filtros["empresa"]
+        id_muestreo = str(row.get("id_muestreo", "") or "").strip()
         try:
             entregas = listar_entregas_por_boleta(
                 DB_FRUTA_PATH,
@@ -1802,39 +1940,66 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 campana=campana or None,
                 empresa=empresa or None,
                 cultivo=cultivo or None,
+                filtros_estrictos=True,
             )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Histórico IA", f"No se pudieron cargar entregas de calibrador:\n{exc}", parent=self)
             return
         if not entregas:
-            messagebox.showwarning(
+            ampliar = messagebox.askyesno(
                 "Histórico IA",
-                "No se encontraron entregas reales para esta boleta.",
+                "No se encontraron albaranes para la campaña actual. ¿Desea ampliar búsqueda?",
                 parent=self,
             )
+            if not ampliar:
+                return
+            try:
+                entregas = listar_entregas_por_boleta(
+                    DB_FRUTA_PATH,
+                    boleta,
+                    campana=campana or None,
+                    empresa=empresa or None,
+                    cultivo=cultivo or None,
+                    filtros_estrictos=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("Histórico IA", f"No se pudieron cargar entregas ampliadas:\n{exc}", parent=self)
+                return
+        if not entregas:
+            messagebox.showwarning("Histórico IA", "No se encontraron entregas reales para esta boleta.", parent=self)
             return
-        entrega_ctx = self._seleccionar_entrega_para_validacion(entregas)
+        entrega_ctx = self._seleccionar_entrega_para_validacion(entregas, contexto=contexto_filtros)
         if not entrega_ctx:
             return
         albaran = str(entrega_ctx.get("AlbaranDef") or entrega_ctx.get("Albaran") or entrega_ctx.get("Albaran2") or "").strip()
         if not albaran:
             messagebox.showerror("Histórico IA", "La entrega seleccionada no contiene número de albarán.", parent=self)
             return
-        confirmar = messagebox.askyesno(
-            "Validar estimación previa",
-            f"Se validará esta estimación previa contra el albarán {albaran}. ¿Continuar?",
-            parent=self,
-        )
-        if not confirmar:
-            return
         try:
+            filas_muestreo = self.history_repo.get_pending_rows_for_muestreo(comparison_id, id_muestreo)
+            if not filas_muestreo:
+                raise LookupError("No se encontraron filas pendientes para el muestreo seleccionado.")
+            consolidado = calcular_consolidado_muestreo(filas_muestreo)
+            total_fotos = int(consolidado.get("numero_fotos", 0) or 0)
+            muestreo_label = id_muestreo or f"LEGACY_{comparison_id}"
+            confirmar = messagebox.askyesno(
+                "Validar estimación previa",
+                f"Se validará el muestreo completo {muestreo_label} con {total_fotos} fotos contra el albarán {albaran}.",
+                parent=self,
+            )
+            if not confirmar:
+                return
             calibrador = cargar_calibrador_por_entrega(entrega_ctx)
             real_norm = normalizar_distribucion_calibres(calibrador["calibres_brutos"])
-            dist_ia = {f"CAL {idx}": float(row.get(f"ia_cal{idx}") or 0.0) for idx in range(10)}
+            dist_ia = {
+                f"CAL {idx}": float(consolidado.get("distribucion_consolidada", {}).get(f"CAL {idx}", 0.0) or 0.0)
+                for idx in range(10)
+            }
             comp = comparar_distribuciones(dist_ia, real_norm)
             payload: dict[str, Any] = {
                 "albaran": albaran,
                 "tipo_comparacion": "entrega",
+                "tipo_validacion": "CONSOLIDADO_MUESTREO",
                 "campana": ObtencionCalibresWindow._to_int_or_none(entrega_ctx.get("Campana")),
                 "empresa": ObtencionCalibresWindow._to_int_or_none(entrega_ctx.get("Empresa")),
                 "socio": str(entrega_ctx.get("Socio", "") or "").strip(),
@@ -1855,14 +2020,15 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 cal = f"CAL {idx}"
                 payload[f"real_norm_cal{idx}"] = real_norm.get(cal, 0.0)
                 payload[f"real_bruto_cal{idx}"] = calibrador.get("calibres_brutos", {}).get(cal, 0.0)
-            ok = self.history_repo.validate_pre_estimation(comparison_id, payload)
+            ids_muestreo = [int(item.get("id") or 0) for item in filas_muestreo]
+            ok = self.history_repo.validate_pre_estimations_batch(ids_muestreo, payload)
             if not ok:
-                raise LookupError("No se pudo actualizar la fila seleccionada.")
+                raise LookupError("No se pudo actualizar el muestreo seleccionado.")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Histórico IA", f"No se pudo validar la estimación previa:\n{exc}", parent=self)
             return
         self._buscar_historico()
-        messagebox.showinfo("Histórico IA", "Estimación validada correctamente.", parent=self)
+        messagebox.showinfo("Histórico IA", "Muestreo validado correctamente.", parent=self)
 
     def _on_double_click_historial(self, _event: tk.Event) -> None:
         selected = self.tree_historial.selection()
@@ -3912,6 +4078,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "fecha_validacion": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "id_muestreo": str(self._current_muestra_id or "").strip() or None,
             "metodo_consolidacion": METODO_CONSOLIDACION_MEDIA_SIMPLE,
+            "tipo_validacion": "POR_FOTO",
         }
         for idx in range(10):
             calibre = f"CAL {idx}"
@@ -3972,6 +4139,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "fecha_validacion": None,
             "id_muestreo": str(self._current_muestra_id or "").strip() or None,
             "metodo_consolidacion": METODO_CONSOLIDACION_MEDIA_SIMPLE,
+            "tipo_validacion": None,
         }
         for idx in range(10):
             calibre = f"CAL {idx}"
