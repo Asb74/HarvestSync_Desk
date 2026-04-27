@@ -52,6 +52,7 @@ FILTRO_CALIBRADOR_CULTIVO = "CITRICOS"
 OPCION_BOLETA_COMPLETA = "Boleta completa"
 ESTADO_ESTIMACION_PREVIA = "ESTIMACION_PREVIA"
 ESTADO_VALIDADO = "VALIDADO_CON_CALIBRADOR"
+ESTADO_LEGACY_VALIDADO = "LEGACY_VALIDADO"
 METODO_CONSOLIDACION_MEDIA_SIMPLE = "media_simple"
 
 
@@ -744,7 +745,20 @@ class CalibresIAHistoryRepository:
 
     @staticmethod
     def _estado_sql_expr() -> str:
-        return f"COALESCE(NULLIF(TRIM(estado_registro), ''), CASE WHEN error_absoluto_medio IS NOT NULL THEN '{ESTADO_VALIDADO}' ELSE '' END)"
+        return (
+            "CASE "
+            f"WHEN COALESCE(NULLIF(TRIM(estado_registro), ''), '') = '{ESTADO_ESTIMACION_PREVIA}' THEN '{ESTADO_ESTIMACION_PREVIA}' "
+            f"WHEN COALESCE(NULLIF(TRIM(estado_registro), ''), '') = '{ESTADO_VALIDADO}' THEN '{ESTADO_VALIDADO}' "
+            f"WHEN (estado_registro IS NULL OR TRIM(estado_registro) = '') AND error_absoluto_medio IS NOT NULL THEN '{ESTADO_LEGACY_VALIDADO}' "
+            "ELSE COALESCE(NULLIF(TRIM(estado_registro), ''), '') END"
+        )
+
+    @staticmethod
+    def _validated_state_sql_expr() -> str:
+        return (
+            f"(estado_registro = '{ESTADO_VALIDADO}' "
+            "OR ((estado_registro IS NULL OR TRIM(estado_registro) = '') AND error_absoluto_medio IS NOT NULL))"
+        )
 
     def validate_pre_estimation(self, comparison_id: int, payload: dict[str, Any]) -> bool:
         self.ensure_schema()
@@ -844,8 +858,18 @@ class CalibresIAHistoryRepository:
             params.append(version_limpia)
         estado_limpio = estado_registro.strip().upper()
         if estado_limpio and estado_limpio != "TODAS":
-            filtros_sql.append(f"{CalibresIAHistoryRepository._estado_sql_expr()} = ?")
-            params.append(estado_limpio)
+            if estado_limpio == ESTADO_ESTIMACION_PREVIA:
+                filtros_sql.append("COALESCE(NULLIF(TRIM(estado_registro), ''), '') = ?")
+                params.append(ESTADO_ESTIMACION_PREVIA)
+            elif estado_limpio == ESTADO_VALIDADO:
+                filtros_sql.append(CalibresIAHistoryRepository._validated_state_sql_expr())
+            elif estado_limpio == ESTADO_LEGACY_VALIDADO:
+                filtros_sql.append(
+                    "((estado_registro IS NULL OR TRIM(estado_registro) = '') AND error_absoluto_medio IS NOT NULL)"
+                )
+            else:
+                filtros_sql.append(f"{CalibresIAHistoryRepository._estado_sql_expr()} = ?")
+                params.append(estado_limpio)
         return filtros_sql, params
 
     def list_comparisons(
@@ -870,7 +894,6 @@ class CalibresIAHistoryRepository:
             prompt_version=prompt_version,
             estado_registro=estado_registro,
         )
-        filtros_sql.append(f"{self._estado_sql_expr()} = '{ESTADO_VALIDADO}'")
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
             SELECT
@@ -930,8 +953,8 @@ class CalibresIAHistoryRepository:
             cultivo=cultivo,
             calidad=calidad,
             prompt_version=prompt_version,
-            estado_registro=estado_registro,
         )
+        filtros_sql.append(self._validated_state_sql_expr())
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
         sql = f"""
             SELECT
@@ -998,6 +1021,7 @@ class CalibresIAHistoryRepository:
         cultivo: str = "",
         calidad: str = "",
         prompt_version: str = "",
+        estado_registro: str = "TODAS",
     ) -> dict[str, Any]:
         self.ensure_schema()
         filtros_sql, params = self._build_filtros_sql(
@@ -1007,17 +1031,21 @@ class CalibresIAHistoryRepository:
             cultivo=cultivo,
             calidad=calidad,
             prompt_version=prompt_version,
+            estado_registro=estado_registro,
         )
-        filtros_sql.append(f"{self._estado_sql_expr()} = '{ESTADO_VALIDADO}'")
         where_sql = f"WHERE {' AND '.join(filtros_sql)}" if filtros_sql else ""
+        validados_sql = self._validated_state_sql_expr()
         sql_base = f"""
             SELECT
                 COUNT(*) AS total_registros,
-                AVG(COALESCE(error_absoluto_medio, 0)) AS error_medio_global,
-                AVG(COALESCE(error_total_absoluto, 0)) AS error_total_medio,
-                SUM(CASE WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 1 ELSE 0 END) AS total_buena,
+                SUM(CASE WHEN COALESCE(NULLIF(TRIM(estado_registro), ''), '') = '{ESTADO_ESTIMACION_PREVIA}' THEN 1 ELSE 0 END) AS total_pendientes,
+                SUM(CASE WHEN {validados_sql} THEN 1 ELSE 0 END) AS total_validados,
+                AVG(CASE WHEN {validados_sql} THEN COALESCE(error_absoluto_medio, 0) END) AS error_medio_global,
+                AVG(CASE WHEN {validados_sql} THEN COALESCE(error_total_absoluto, 0) END) AS error_total_medio,
+                SUM(CASE WHEN {validados_sql} AND COALESCE(error_absoluto_medio, 999999) <= 5 THEN 1 ELSE 0 END) AS total_buena,
                 SUM(
                     CASE
+                        WHEN NOT {validados_sql} THEN 0
                         WHEN COALESCE(error_absoluto_medio, 999999) > 5
                         AND COALESCE(error_absoluto_medio, 999999) <= 10 THEN 1
                         ELSE 0
@@ -1025,19 +1053,20 @@ class CalibresIAHistoryRepository:
                 ) AS total_aceptable,
                 SUM(
                     CASE
+                        WHEN NOT {validados_sql} THEN 0
                         WHEN COALESCE(error_absoluto_medio, 999999) > 10
                         AND COALESCE(error_absoluto_medio, 999999) <= 15 THEN 1
                         ELSE 0
                     END
                 ) AS total_mala,
-                SUM(CASE WHEN COALESCE(error_absoluto_medio, 999999) > 15 THEN 1 ELSE 0 END) AS total_muy_mala
+                SUM(CASE WHEN {validados_sql} AND COALESCE(error_absoluto_medio, 999999) > 15 THEN 1 ELSE 0 END) AS total_muy_mala
             FROM comparaciones_calibres
             {where_sql}
         """
         sql_dom_ia = f"""
             SELECT calibre_dominante_ia, COUNT(*) AS total
             FROM comparaciones_calibres
-            {where_sql}
+            {where_sql} {"AND" if where_sql else "WHERE"} {validados_sql}
             GROUP BY calibre_dominante_ia
             ORDER BY total DESC, calibre_dominante_ia ASC
             LIMIT 1
@@ -1045,7 +1074,7 @@ class CalibresIAHistoryRepository:
         sql_dom_real = f"""
             SELECT calibre_dominante_real, COUNT(*) AS total
             FROM comparaciones_calibres
-            {where_sql}
+            {where_sql} {"AND" if where_sql else "WHERE"} {validados_sql}
             GROUP BY calibre_dominante_real
             ORDER BY total DESC, calibre_dominante_real ASC
             LIMIT 1
@@ -1062,6 +1091,8 @@ class CalibresIAHistoryRepository:
             "numero_registros": int(base["total_registros"] or 0),
             "error_medio_global": float(base["error_medio_global"] or 0.0),
             "error_total_medio": float(base["error_total_medio"] or 0.0),
+            "total_pendientes": int(base["total_pendientes"] or 0),
+            "total_validados": int(base["total_validados"] or 0),
             "dominante_ia_mas_frecuente": str((dom_ia["calibre_dominante_ia"] if dom_ia else "") or "-"),
             "dominante_real_mas_frecuente": str((dom_real["calibre_dominante_real"] if dom_real else "") or "-"),
             "total_buena": int(base["total_buena"] or 0),
@@ -1088,6 +1119,7 @@ class CalibresIAHistoryRepository:
         base = dict(filtros)
         prompt_version_filtro = str(base.get("prompt_version", "") or "").strip()
         base["prompt_version"] = ""
+        base["estado_registro"] = ESTADO_VALIDADO
         if prompt_version_filtro and prompt_version_filtro.upper() != "TODAS":
             versiones = [prompt_version_filtro]
         else:
@@ -1451,11 +1483,12 @@ class CalibresIAHistoryWindow(tk.Toplevel):
 
         def worker() -> None:
             try:
-                rows = self.history_repo.list_comparisons_for_bias(**filtros)
+                rows = self.history_repo.list_comparisons(**filtros)
+                rows_sesgo = self.history_repo.list_comparisons_for_bias(**filtros)
                 summary = self.history_repo.get_summary(**filtros)
                 summary_by_version = self.history_repo.get_summary_by_version(**filtros)
                 versions = self.history_repo.list_prompt_versions()
-                self.after(0, lambda: self._on_busqueda_ok(rows, summary, summary_by_version, versions))
+                self.after(0, lambda: self._on_busqueda_ok(rows, rows_sesgo, summary, summary_by_version, versions))
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda error=exc: self._on_busqueda_error(error))
 
@@ -1464,6 +1497,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
     def _on_busqueda_ok(
         self,
         rows: list[dict[str, Any]],
+        rows_sesgo: list[dict[str, Any]],
         summary: dict[str, Any],
         summary_by_version: list[dict[str, Any]],
         versions: list[str],
@@ -1505,10 +1539,19 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                     row.get("calidad", clasificar_calidad_error(row.get("error_absoluto_medio"))),
                 ),
             )
-        total_pendientes = sum(
-            1 for row in rows if str(row.get("estado_registro", "")).strip().upper() == ESTADO_ESTIMACION_PREVIA
+        total_pendientes = int(summary.get("total_pendientes", 0) or 0)
+        total_validados = int(summary.get("total_validados", 0) or 0)
+        estado_filtro = self.estado_registro_var.get().strip().upper()
+        texto_error_medio = (
+            "pendiente"
+            if estado_filtro == ESTADO_ESTIMACION_PREVIA
+            else self._fmt_number(summary.get("error_medio_global"))
         )
-        total_validados = sum(1 for row in rows if str(row.get("estado_registro", "")).strip().upper() == ESTADO_VALIDADO)
+        texto_error_total = (
+            "pendiente"
+            if estado_filtro == ESTADO_ESTIMACION_PREVIA
+            else self._fmt_number(summary.get("error_total_medio"))
+        )
         self.resumen_var.set(
             "Registros={numero_registros} | Error medio global={error_medio_global} | "
             "Error total medio={error_total_medio} | Dominante IA frecuente={dominante_ia_mas_frecuente} | "
@@ -1516,8 +1559,8 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "ACEPTABLE={total_aceptable} | MALA={total_mala} | MUY_MALA={total_muy_mala} | "
             "Previas pendientes={total_pendientes} | Validados={total_validados}".format(
                 numero_registros=summary.get("numero_registros", 0),
-                error_medio_global=self._fmt_number(summary.get("error_medio_global")),
-                error_total_medio=self._fmt_number(summary.get("error_total_medio")),
+                error_medio_global=texto_error_medio,
+                error_total_medio=texto_error_total,
                 dominante_ia_mas_frecuente=summary.get("dominante_ia_mas_frecuente", "-"),
                 dominante_real_mas_frecuente=summary.get("dominante_real_mas_frecuente", "-"),
                 total_buena=summary.get("total_buena", 0),
@@ -1528,7 +1571,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 total_validados=total_validados,
             )
         )
-        analisis_sesgo = calcular_sesgo_por_calibre(rows)
+        analisis_sesgo = calcular_sesgo_por_calibre(rows_sesgo)
         self._current_rows_data = rows
         self._on_select_historial()
         self._render_sesgo(analisis_sesgo)
