@@ -316,10 +316,17 @@ def _normalizar_porcentaje(value: Any) -> float:
 def listar_entregas_por_boleta(
     db_path: str,
     boleta: str,
-    campana: str = FILTRO_CALIBRADOR_CAMPANA,
-    empresa: str = FILTRO_CALIBRADOR_EMPRESA,
-    cultivo: str = FILTRO_CALIBRADOR_CULTIVO,
+    campana: str | None = FILTRO_CALIBRADOR_CAMPANA,
+    empresa: str | None = FILTRO_CALIBRADOR_EMPRESA,
+    cultivo: str | None = FILTRO_CALIBRADOR_CULTIVO,
 ) -> list[dict[str, Any]]:
+    boleta_norm = str(boleta or "").strip()
+    if not boleta_norm:
+        return []
+    campana_norm = str(campana or "").strip()
+    empresa_norm = str(empresa or "").strip()
+    cultivo_norm = str(cultivo or "").strip().upper()
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only = ON;")
@@ -355,12 +362,23 @@ def listar_entregas_por_boleta(
             COALESCE("%Cal9", 0) AS Cal9
         FROM PesosFres
         WHERE TRIM(COALESCE(Boleta, '')) = ?
-          AND TRIM(COALESCE(CAMPAÑA, '')) = ?
-          AND TRIM(COALESCE(EMPRESA, '')) = ?
-          AND UPPER(TRIM(COALESCE(CULTIVO, ''))) = ?
+          AND (TRIM(COALESCE(CAMPAÑA, '')) = ? OR ? = '')
+          AND (TRIM(COALESCE(EMPRESA, '')) = ? OR ? = '')
+          AND (UPPER(TRIM(COALESCE(CULTIVO, ''))) = ? OR ? = '')
         ORDER BY DATE(COALESCE(Fcarga, '')) ASC, TRIM(COALESCE(AlbaranDef, Albaran, '')) ASC
         """
-        rows = conn.execute(sql, (boleta, campana, empresa, cultivo.upper())).fetchall()
+        rows = conn.execute(
+            sql,
+            (
+                boleta_norm,
+                campana_norm,
+                campana_norm,
+                empresa_norm,
+                empresa_norm,
+                cultivo_norm,
+                cultivo_norm,
+            ),
+        ).fetchall()
     finally:
         conn.close()
 
@@ -659,6 +677,14 @@ class CalibresIAHistoryRepository:
                 self.ensure_column_exists(conn, "comparaciones_calibres", "fecha_validacion", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "id_muestreo", "TEXT")
                 self.ensure_column_exists(conn, "comparaciones_calibres", "metodo_consolidacion", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "albaran", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "estado_registro", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "error_absoluto_medio", "REAL")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "error_total_absoluto", "REAL")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "calibre_dominante_real", "TEXT")
+                for idx in range(10):
+                    self.ensure_column_exists(conn, "comparaciones_calibres", f"real_norm_cal{idx}", "REAL")
+                    self.ensure_column_exists(conn, "comparaciones_calibres", f"real_bruto_cal{idx}", "REAL")
                 conn.execute("DROP INDEX IF EXISTS ux_comp_calibres_dedupe")
                 conn.commit()
             db_exists_after = os.path.exists(self.db_path)
@@ -901,6 +927,8 @@ class CalibresIAHistoryRepository:
                 fecha_registro,
                 boleta,
                 albaran,
+                campana,
+                empresa,
                 variedad,
                 cultivo,
                 id_foto,
@@ -913,6 +941,8 @@ class CalibresIAHistoryRepository:
                 calibre_dominante_real,
                 error_absoluto_medio,
                 error_total_absoluto,
+                ia_cal0, ia_cal1, ia_cal2, ia_cal3, ia_cal4,
+                ia_cal5, ia_cal6, ia_cal7, ia_cal8, ia_cal9,
                 CASE
                     WHEN {self._estado_sql_expr()} = '{ESTADO_ESTIMACION_PREVIA}' THEN 'PENDIENTE'
                     WHEN COALESCE(error_absoluto_medio, 999999) <= 5 THEN 'BUENA'
@@ -1680,6 +1710,63 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         except (TypeError, ValueError):
             return "-"
 
+    def _seleccionar_entrega_para_validacion(self, entregas: list[dict[str, Any]]) -> dict[str, Any] | None:
+        class _SelectorAlbaranDialog(simpledialog.Dialog):
+            def __init__(self, parent: tk.Widget, opciones: list[dict[str, Any]]) -> None:
+                self.opciones = opciones
+                self.result: dict[str, Any] | None = None
+                super().__init__(parent, title="Seleccionar albarán real")
+
+            def body(self, master: tk.Widget) -> tk.Widget:
+                frame = ttk.Frame(master, padding=6)
+                frame.grid(row=0, column=0, sticky="nsew")
+                ttk.Label(frame, text="Seleccione la entrega real para validar la estimación previa.").grid(
+                    row=0, column=0, sticky="w", pady=(0, 6)
+                )
+                columnas = ("albaran", "fecha", "neto", "variedad")
+                self.tree = ttk.Treeview(frame, columns=columnas, show="headings", height=10)
+                self.tree.heading("albaran", text="Albarán")
+                self.tree.heading("fecha", text="Fecha")
+                self.tree.heading("neto", text="Neto")
+                self.tree.heading("variedad", text="Variedad")
+                self.tree.column("albaran", width=180, anchor="w")
+                self.tree.column("fecha", width=120, anchor="w")
+                self.tree.column("neto", width=110, anchor="e")
+                self.tree.column("variedad", width=160, anchor="w")
+                self.tree.grid(row=1, column=0, sticky="nsew")
+                scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+                scroll.grid(row=1, column=1, sticky="ns")
+                self.tree.configure(yscrollcommand=scroll.set)
+                frame.rowconfigure(1, weight=1)
+                frame.columnconfigure(0, weight=1)
+                for idx, item in enumerate(self.opciones):
+                    albaran = str(item.get("AlbaranDef") or item.get("Albaran") or item.get("Albaran2") or "").strip()
+                    fecha = str(item.get("Fcarga") or item.get("FRecoleccion") or "").strip()
+                    neto = _valor_a_float(item.get("Neto"), 0.0)
+                    variedad = str(item.get("Variedad") or "").strip()
+                    self.tree.insert("", "end", iid=f"ent_{idx}", values=(albaran, fecha, f"{neto:.3f}", variedad))
+                self.tree.bind("<Double-1>", lambda _e: self.ok())
+                children = self.tree.get_children("")
+                if children:
+                    self.tree.selection_set(children[0])
+                    self.tree.focus(children[0])
+                return self.tree
+
+            def validate(self) -> bool:
+                selected = self.tree.selection()
+                if not selected:
+                    messagebox.showwarning("Histórico IA", "Seleccione un albarán real para continuar.", parent=self)
+                    return False
+                idx = int(str(selected[0]).replace("ent_", ""))
+                self.result = self.opciones[idx]
+                return True
+
+            def apply(self) -> None:
+                return
+
+        dialog = _SelectorAlbaranDialog(self, entregas)
+        return dialog.result
+
     def _on_select_historial(self, _event: tk.Event | None = None) -> None:
         selected = self.tree_historial.selection()
         enabled = False
@@ -1705,53 +1792,49 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             messagebox.showerror("Histórico IA", "La fila no tiene boleta asociada para validar.", parent=self)
             return
 
+        cultivo = str(row.get("cultivo", "") or "").strip()
+        campana = str(row.get("campana", "") or "").strip()
+        empresa = str(row.get("empresa", "") or "").strip()
         try:
-            entregas = listar_entregas_por_boleta(DB_FRUTA_PATH, boleta)
+            entregas = listar_entregas_por_boleta(
+                DB_FRUTA_PATH,
+                boleta,
+                campana=campana or None,
+                empresa=empresa or None,
+                cultivo=cultivo or None,
+            )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Histórico IA", f"No se pudieron cargar entregas de calibrador:\n{exc}", parent=self)
             return
         if not entregas:
-            messagebox.showwarning("Histórico IA", f"No hay entregas de calibrador para boleta {boleta}.", parent=self)
+            messagebox.showwarning(
+                "Histórico IA",
+                "No se encontraron entregas reales para esta boleta.",
+                parent=self,
+            )
             return
-        opciones = [OPCION_BOLETA_COMPLETA]
-        for entrega in entregas:
-            texto = str(entrega.get("AlbaranDef") or entrega.get("Albaran") or entrega.get("Albaran2") or "").strip()
-            if texto:
-                opciones.append(texto)
-        seleccion = simpledialog.askstring(
+        entrega_ctx = self._seleccionar_entrega_para_validacion(entregas)
+        if not entrega_ctx:
+            return
+        albaran = str(entrega_ctx.get("AlbaranDef") or entrega_ctx.get("Albaran") or entrega_ctx.get("Albaran2") or "").strip()
+        if not albaran:
+            messagebox.showerror("Histórico IA", "La entrega seleccionada no contiene número de albarán.", parent=self)
+            return
+        confirmar = messagebox.askyesno(
             "Validar estimación previa",
-            "Albarán a validar (vacío = boleta completa):\n" + "\n".join(opciones[:20]),
+            f"Se validará esta estimación previa contra el albarán {albaran}. ¿Continuar?",
             parent=self,
         )
-        if seleccion is None:
+        if not confirmar:
             return
-        seleccion_limpia = seleccion.strip()
         try:
-            if not seleccion_limpia or seleccion_limpia.upper() == OPCION_BOLETA_COMPLETA.upper():
-                calibrador = cargar_calibrador_boleta_ponderado(entregas)
-                entrega_ctx = entregas[0]
-                albaran = OPCION_BOLETA_COMPLETA
-                tipo_comparacion = "boleta_completa_ponderada"
-            else:
-                entrega_ctx = next(
-                    (
-                        e for e in entregas
-                        if str(e.get("AlbaranDef") or e.get("Albaran") or e.get("Albaran2") or "").strip().upper()
-                        == seleccion_limpia.upper()
-                    ),
-                    None,
-                )
-                if not entrega_ctx:
-                    raise ValueError("El albarán indicado no existe en las entregas cargadas.")
-                calibrador = cargar_calibrador_por_entrega(entrega_ctx)
-                albaran = str(entrega_ctx.get("AlbaranDef") or entrega_ctx.get("Albaran") or entrega_ctx.get("Albaran2") or "").strip()
-                tipo_comparacion = "entrega"
+            calibrador = cargar_calibrador_por_entrega(entrega_ctx)
             real_norm = normalizar_distribucion_calibres(calibrador["calibres_brutos"])
             dist_ia = {f"CAL {idx}": float(row.get(f"ia_cal{idx}") or 0.0) for idx in range(10)}
             comp = comparar_distribuciones(dist_ia, real_norm)
             payload: dict[str, Any] = {
                 "albaran": albaran,
-                "tipo_comparacion": tipo_comparacion,
+                "tipo_comparacion": "entrega",
                 "campana": ObtencionCalibresWindow._to_int_or_none(entrega_ctx.get("Campana")),
                 "empresa": ObtencionCalibresWindow._to_int_or_none(entrega_ctx.get("Empresa")),
                 "socio": str(entrega_ctx.get("Socio", "") or "").strip(),
@@ -1779,7 +1862,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             messagebox.showerror("Histórico IA", f"No se pudo validar la estimación previa:\n{exc}", parent=self)
             return
         self._buscar_historico()
-        messagebox.showinfo("Histórico IA", "Estimación previa validada correctamente.", parent=self)
+        messagebox.showinfo("Histórico IA", "Estimación validada correctamente.", parent=self)
 
     def _on_double_click_historial(self, _event: tk.Event) -> None:
         selected = self.tree_historial.selection()
