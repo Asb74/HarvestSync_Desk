@@ -496,6 +496,14 @@ class CalibresIAHistoryRepository:
             )
         return parent_dir, parent_exists
 
+    @staticmethod
+    def ensure_column_exists(
+        conn: sqlite3.Connection, table_name: str, column_name: str, column_definition: str
+    ) -> None:
+        cols = {str(row[1]).strip().lower() for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        if column_name.strip().lower() not in cols:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
     def ensure_schema(self) -> None:
         with self._lock:
             if self._initialized:
@@ -580,11 +588,10 @@ class CalibresIAHistoryRepository:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_variedad ON comparaciones_calibres (variedad)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_cultivo ON comparaciones_calibres (cultivo)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_comp_calibres_prompt_version ON comparaciones_calibres (prompt_version)")
-                cols = {str(row[1]).strip().lower() for row in conn.execute("PRAGMA table_info(comparaciones_calibres)").fetchall()}
-                if "prompt_version" not in cols:
-                    conn.execute("ALTER TABLE comparaciones_calibres ADD COLUMN prompt_version TEXT")
-                if "prompt_source" not in cols:
-                    conn.execute("ALTER TABLE comparaciones_calibres ADD COLUMN prompt_source TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "cultivo", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "variedad", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "prompt_version", "TEXT")
+                self.ensure_column_exists(conn, "comparaciones_calibres", "prompt_source", "TEXT")
                 conn.execute("DROP INDEX IF EXISTS ux_comp_calibres_dedupe")
                 conn.commit()
             db_exists_after = os.path.exists(self.db_path)
@@ -745,6 +752,7 @@ class CalibresIAHistoryRepository:
                 id_foto,
                 modelo_ia,
                 COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS prompt_version,
+                COALESCE(NULLIF(TRIM(prompt_source), ''), 'no_informado') AS prompt_source,
                 confianza_ia,
                 calibre_dominante_ia,
                 calibre_dominante_real,
@@ -801,6 +809,7 @@ class CalibresIAHistoryRepository:
                 id_foto,
                 modelo_ia,
                 COALESCE(NULLIF(TRIM(prompt_version), ''), 'sin_version') AS prompt_version,
+                COALESCE(NULLIF(TRIM(prompt_source), ''), 'no_informado') AS prompt_source,
                 confianza_ia,
                 calibre_dominante_ia,
                 calibre_dominante_real,
@@ -1145,6 +1154,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "id_foto",
             "modelo_ia",
             "prompt_version",
+            "prompt_source",
             "confianza_ia",
             "calibre_dominante_ia",
             "calibre_dominante_real",
@@ -1161,6 +1171,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "id_foto": "Id foto",
             "modelo_ia": "Modelo IA",
             "prompt_version": "Prompt ver.",
+            "prompt_source": "Prompt source",
             "confianza_ia": "Confianza",
             "calibre_dominante_ia": "Dominante IA",
             "calibre_dominante_real": "Dominante real",
@@ -1176,6 +1187,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
             "id_foto": 190,
             "modelo_ia": 150,
             "prompt_version": 140,
+            "prompt_source": 140,
             "confianza_ia": 85,
             "calibre_dominante_ia": 120,
             "calibre_dominante_real": 120,
@@ -1318,6 +1330,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                     row.get("id_foto", "-"),
                     row.get("modelo_ia", "-"),
                     row.get("prompt_version", "sin_version"),
+                    row.get("prompt_source", "no_informado"),
                     self._fmt_number(row.get("confianza_ia")),
                     row.get("calibre_dominante_ia", "-"),
                     row.get("calibre_dominante_real", "-"),
@@ -1485,7 +1498,9 @@ class CalibresIAHistoryWindow(tk.Toplevel):
         meta = (
             f"Fecha={detail.get('fecha_registro', '-')} | Boleta={detail.get('boleta', '-')} | "
             f"Albarán={detail.get('albaran', '-')} | Variedad={detail.get('variedad', '-')} | "
+            f"Cultivo={detail.get('cultivo', '-') or '-'} | "
             f"Prompt={str(detail.get('prompt_version', '') or '').strip() or 'sin_version'} | "
+            f"Prompt source={str(detail.get('prompt_source', '') or '').strip() or 'no_informado'} | "
             f"Foto={detail.get('id_foto', '-')}"
         )
         ttk.Label(frame, text=meta, foreground="#34495e", wraplength=940).grid(row=0, column=0, sticky="w", pady=(0, 8))
@@ -1514,6 +1529,13 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 "",
                 "=== Calidad comparación ===",
                 f"Calidad: {clasificar_calidad_error(detail.get('error_absoluto_medio'))}",
+                "",
+                "=== Metadatos IA ===",
+                f"modelo_ia: {detail.get('modelo_ia', '-')}",
+                f"prompt_version: {str(detail.get('prompt_version', '') or '').strip() or 'sin_version'}",
+                f"prompt_source: {str(detail.get('prompt_source', '') or '').strip() or 'no_informado'}",
+                f"cultivo: {str(detail.get('cultivo', '') or '').strip() or '-'}",
+                f"variedad: {str(detail.get('variedad', '') or '').strip() or '-'}",
                 "",
                 f"podrido: {self._fmt_number(detail.get('podrido'))}",
                 f"deslinea: {self._fmt_number(detail.get('deslinea'))}",
@@ -2679,6 +2701,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.btn_validacion_ia.config(state="disabled")
         self.estado_var.set(f"Validación IA en curso para foto {id_foto}...")
         timeout_seconds = 25
+        cultivo = self._resolver_cultivo_ia()
+        variedad = self._resolver_variedad_ia()
 
         def worker() -> None:
             t0 = time.perf_counter()
@@ -2699,6 +2723,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         "Evaluar utilidad de imagen para calibres: "
                         "visibilidad general, oclusión, nitidez y presencia/claridad del patrón."
                     ),
+                    cultivo=cultivo,
+                    variedad=variedad,
                     timeout_seconds=timeout_seconds,
                 )
                 elapsed = time.perf_counter() - t0
@@ -3075,6 +3101,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
             return next(iter(variedades))
         return "*"
 
+    def _resolver_cultivo_ia(self) -> str:
+        muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
+        cultivo = str(muestra.get("cultivo", "")).strip().upper() if muestra else ""
+        return cultivo or "*"
+
     def _cargar_entregas_calibrador(self) -> None:
         boleta = self._get_boleta_actual()
         if not boleta:
@@ -3330,7 +3361,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         advertencias_texto = " | ".join(str(item).strip() for item in advertencias if str(item).strip())
         raw_result = estimacion.get("raw_result", {})
         prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or PROMPT_VERSION
-        prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "legacy_unspecified"
+        prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
         cultivo_ia = str(raw_result.get("cultivo", "") or "").strip()
         variedad_ia = str(raw_result.get("variedad", "") or "").strip()
 
@@ -3656,6 +3687,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
         muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
         cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
+        cultivo_payload = cultivo.strip().upper() or "*"
         variedad = self._resolver_variedad_ia()
         rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
         diametro_patron = self._config.diametro_patron_mm if self._config else 94.0
@@ -3736,7 +3768,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         image_url=image_url_for_ai,
                         task="estimacion_calibres",
                         context=json.dumps(contexto, ensure_ascii=False),
-                        cultivo=cultivo,
+                        cultivo=cultivo_payload,
                         variedad=variedad,
                         timeout_seconds=30,
                     )
@@ -3838,6 +3870,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
             return
         LOGGER.info("Flujo recomendado: inicio muestra=%s source_ia=%s", self._current_muestra_id, source)
+        cultivo_ia = self._resolver_cultivo_ia()
+        variedad_ia = self._resolver_variedad_ia()
 
         self._flujo_recomendado_en_curso = True
         self._set_controles_lote_ia_habilitados(False)
@@ -3874,6 +3908,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
                                     "Evaluar utilidad de imagen para calibres: "
                                     "visibilidad general, oclusión, nitidez y presencia/claridad del patrón."
                                 ),
+                                cultivo=cultivo_ia,
+                                variedad=variedad_ia,
                                 timeout_seconds=25,
                             )
                             parsed = self._parse_validacion_ia_result(result)
@@ -4048,6 +4084,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self._set_controles_lote_ia_habilitados(False)
         self.estado_var.set(f"Validando IA 0/{len(ids_seleccionadas)}...")
         resultados_lote = self._get_ia_resultados_muestra_actual()
+        cultivo_ia = self._resolver_cultivo_ia()
+        variedad_ia = self._resolver_variedad_ia()
 
         def worker() -> None:
             batch_t0 = time.perf_counter()
@@ -4082,6 +4120,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
                             "Evaluar utilidad de imagen para calibres: "
                             "visibilidad general, oclusión, nitidez y presencia/claridad del patrón."
                         ),
+                        cultivo=cultivo_ia,
+                        variedad=variedad_ia,
                         timeout_seconds=timeout_seconds,
                     )
                     parsed = self._parse_validacion_ia_result(result)
@@ -4298,15 +4338,21 @@ class ObtencionCalibresWindow(BaseToolWindow):
         parseado_pretty = json.dumps(parseado, ensure_ascii=False, indent=2) if isinstance(parseado, dict) else "-"
         diagnostico = str(row.get("diagnostico", "")).strip() or "-"
         raw_result = row.get("raw_result", {})
+        modelo_ia = str(raw_result.get("model", "") or "").strip() or "-"
         prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or "-"
-        prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "-"
+        prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
+        cultivo = str(raw_result.get("cultivo", "") or "").strip() or "-"
+        variedad = str(raw_result.get("variedad", "") or "").strip() or "-"
 
         encabezado = (
             f"id_foto: {id_foto}\n"
             f"image_url: {image_url}\n"
             f"task: {task_enviada}\n"
+            f"modelo: {modelo_ia}\n"
             f"prompt_version: {prompt_version}\n"
             f"prompt_source: {prompt_source}\n"
+            f"cultivo: {cultivo}\n"
+            f"variedad: {variedad}\n"
             f"estado: {row.get('estado', '-')}\n"
             f"diagnóstico: {diagnostico}"
         )

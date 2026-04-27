@@ -32,10 +32,10 @@ def call_analyze_image(
         "task": task,
         "context": context,
     }
-    if isinstance(cultivo, str) and cultivo.strip():
-        body["cultivo"] = cultivo.strip()
-    if isinstance(variedad, str) and variedad.strip():
-        body["variedad"] = variedad.strip()
+    cultivo_limpio = cultivo.strip() if isinstance(cultivo, str) else ""
+    variedad_limpia = variedad.strip() if isinstance(variedad, str) else ""
+    body["cultivo"] = cultivo_limpio or "*"
+    body["variedad"] = variedad_limpia or "*"
     if isinstance(image_url, str) and image_url.strip():
         body["image_url"] = image_url.strip()
     if isinstance(image_path, str) and image_path.strip():
