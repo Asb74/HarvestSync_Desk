@@ -5,10 +5,12 @@ import io
 import json
 import logging
 import os
+import re
 import sqlite3
 import tempfile
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +56,154 @@ ESTADO_ESTIMACION_PREVIA = "ESTIMACION_PREVIA"
 ESTADO_VALIDADO = "VALIDADO_CON_CALIBRADOR"
 ESTADO_LEGACY_VALIDADO = "LEGACY_VALIDADO"
 METODO_CONSOLIDACION_MEDIA_SIMPLE = "media_simple"
+
+
+def _normalize_prompt_slug(value: str) -> str:
+    texto = str(value or "").strip().lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
+    texto = re.sub(r"[^a-z0-9]+", "_", texto)
+    texto = re.sub(r"_+", "_", texto)
+    return texto.strip("_")
+
+
+def suggest_prompt_version(cultivo: str, variedad: str) -> str:
+    cultivo_slug = _normalize_prompt_slug(cultivo) or "cultivo"
+    variedad_slug = _normalize_prompt_slug(variedad) or "variedad"
+    return f"v1_{cultivo_slug}_{variedad_slug}"
+
+
+def list_prompt_bases(task: str, cultivo: str, db_path: str) -> list[dict[str, Any]]:
+    task_norm = str(task or "").strip() or "estimacion_calibres"
+    cultivo_norm = str(cultivo or "").strip().upper() or "*"
+    rows: list[sqlite3.Row] = []
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = list(
+            conn.execute(
+                """
+                SELECT id, task, cultivo, variedad, prompt_version, nombre, descripcion, texto_prompt, activo, es_default
+                FROM prompts_ia
+                WHERE task = ?
+                  AND activo = 1
+                  AND (cultivo = ? OR cultivo = '*')
+                ORDER BY id DESC
+                """,
+                (task_norm, cultivo_norm),
+            ).fetchall()
+        )
+
+    opciones: list[dict[str, Any]] = []
+    added_ids: set[int] = set()
+
+    def _append_option(row: sqlite3.Row, etiqueta: str, recomendado: bool = False) -> None:
+        row_id = int(row["id"])
+        if row_id in added_ids:
+            return
+        added_ids.add(row_id)
+        opciones.append(
+            {
+                "id": row_id,
+                "label": etiqueta,
+                "task": str(row["task"]),
+                "cultivo": str(row["cultivo"]),
+                "variedad": str(row["variedad"]),
+                "prompt_version": str(row["prompt_version"]),
+                "nombre": str(row["nombre"] or "").strip(),
+                "descripcion": str(row["descripcion"] or "").strip(),
+                "texto_prompt": str(row["texto_prompt"] or ""),
+                "recomendado": recomendado,
+            }
+        )
+
+    exact_by_variedad: dict[str, sqlite3.Row] = {}
+    cultivo_generico: sqlite3.Row | None = None
+    global_generico: sqlite3.Row | None = None
+    for row in rows:
+        variedad_row = str(row["variedad"] or "").strip().upper() or "*"
+        cultivo_row = str(row["cultivo"] or "").strip().upper() or "*"
+        if cultivo_row == cultivo_norm and variedad_row == "*" and cultivo_generico is None:
+            cultivo_generico = row
+            continue
+        if cultivo_row == "*" and variedad_row == "*" and global_generico is None:
+            global_generico = row
+            continue
+        if cultivo_row == cultivo_norm and variedad_row != "*" and variedad_row not in exact_by_variedad:
+            exact_by_variedad[variedad_row] = row
+
+    if cultivo_generico is not None:
+        _append_option(cultivo_generico, f"Prompt genérico de {cultivo_norm}: {cultivo_generico['prompt_version']}")
+
+    if cultivo_norm == "CITRICOS" and "VALENCIA DELTA" in exact_by_variedad:
+        row = exact_by_variedad["VALENCIA DELTA"]
+        _append_option(
+            row,
+            f"Copiar desde VALENCIA DELTA / {row['prompt_version']}",
+            recomendado=True,
+        )
+
+    for variedad, row in sorted(exact_by_variedad.items()):
+        if cultivo_norm == "CITRICOS" and variedad == "VALENCIA DELTA":
+            continue
+        _append_option(row, f"Prompt específico ({variedad}): {row['prompt_version']}")
+
+    if global_generico is not None:
+        _append_option(global_generico, f"Prompt genérico global (*): {global_generico['prompt_version']}")
+
+    return opciones
+
+
+def create_prompt_for_variety(
+    *,
+    db_path: str,
+    task: str,
+    cultivo: str,
+    variedad: str,
+    prompt_version: str,
+    nombre: str,
+    descripcion: str,
+    texto_prompt: str,
+) -> tuple[bool, str]:
+    task_norm = str(task or "").strip() or "estimacion_calibres"
+    cultivo_norm = str(cultivo or "").strip().upper()
+    variedad_norm = str(variedad or "").strip().upper()
+    version_norm = _normalize_prompt_slug(prompt_version)
+    if not cultivo_norm or cultivo_norm == "*":
+        return False, "Cultivo inválido para crear prompt específico."
+    if not variedad_norm or variedad_norm == "*":
+        return False, "Variedad inválida para crear prompt específico."
+    if not version_norm:
+        return False, "La versión de prompt no puede estar vacía."
+    if not str(texto_prompt or "").strip():
+        return False, "El texto del prompt no puede estar vacío."
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            conn.execute(
+                """
+                INSERT INTO prompts_ia (
+                    task, cultivo, variedad, prompt_version, nombre, descripcion, texto_prompt,
+                    activo, es_default, fecha_creacion, fecha_actualizacion
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+                """,
+                (
+                    task_norm,
+                    cultivo_norm,
+                    variedad_norm,
+                    version_norm,
+                    str(nombre or "").strip() or f"Prompt {cultivo_norm} {variedad_norm}",
+                    str(descripcion or "").strip(),
+                    str(texto_prompt),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        return True, "Prompt específico creado. Vuelva a ejecutar la estimación IA para usarlo."
+    except sqlite3.IntegrityError:
+        return False, "Ya existe una versión con ese nombre."
 
 
 def normalizar_distribucion_calibres(calibres_brutos: dict[str, float]) -> dict[str, float]:
@@ -2171,9 +2321,18 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.selector_entrega_var = tk.StringVar(value=OPCION_BOLETA_COMPLETA)
         self.ia_contexto_prompt_var = tk.StringVar(value="IA: cultivo=- | variedad=- | prompt=- | source=-")
         self.ia_aviso_prompt_var = tk.StringVar(value="Aviso IA: -")
+        self.crear_prompt_estado_var = tk.StringVar(value="Crear prompt: ejecute estimación IA para evaluar disponibilidad.")
+        self._ultimo_prompt_contexto: dict[str, str] = {
+            "task": "estimacion_calibres",
+            "cultivo": "*",
+            "variedad": "*",
+            "prompt_version": "-",
+            "prompt_source": "no_informado",
+        }
         self._history_window: CalibresIAHistoryWindow | None = None
 
         self._build_ui()
+        self._actualizar_estado_boton_prompt_variedad()
         self._cargar_configuracion()
 
     def _build_ui(self) -> None:
@@ -2429,12 +2588,20 @@ class ObtencionCalibresWindow(BaseToolWindow):
             wraplength=980,
             justify="left",
         ).grid(row=4, column=0, sticky="w", pady=(2, 0))
-        ttk.Button(
+        self.btn_crear_prompt_variedad = ttk.Button(
             estimacion_frame,
             text="Crear prompt para variedad",
             state="disabled",
-            command=lambda: messagebox.showinfo("Obtención calibres", "Pendiente de implementar.", parent=self),
-        ).grid(row=5, column=0, sticky="w", pady=(6, 0))
+            command=self._abrir_modal_crear_prompt_variedad,
+        )
+        self.btn_crear_prompt_variedad.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(
+            estimacion_frame,
+            textvariable=self.crear_prompt_estado_var,
+            foreground="#566573",
+            wraplength=980,
+            justify="left",
+        ).grid(row=6, column=0, sticky="w", pady=(2, 0))
 
         comparacion_frame = ttk.LabelFrame(tab_validacion_ia, text="Comparación IA vs calibrador normalizado", padding=6)
         comparacion_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
@@ -3620,7 +3787,170 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.ia_contexto_prompt_var.set("IA: cultivo=- | variedad=- | prompt=- | source=-")
         if hasattr(self, "ia_aviso_prompt_var"):
             self.ia_aviso_prompt_var.set("Aviso IA: -")
+        self._ultimo_prompt_contexto = {
+            "task": "estimacion_calibres",
+            "cultivo": "*",
+            "variedad": "*",
+            "prompt_version": "-",
+            "prompt_source": "no_informado",
+        }
+        self._actualizar_estado_boton_prompt_variedad()
         self._actualizar_resumen_global()
+
+    @staticmethod
+    def _parse_prompt_ctx(texto_contexto: str) -> dict[str, str]:
+        payload = {"cultivo": "*", "variedad": "*", "prompt_version": "-", "prompt_source": "no_informado"}
+        if not texto_contexto:
+            return payload
+        for segmento in str(texto_contexto).split("|"):
+            token = segmento.strip()
+            if token.startswith("IA:"):
+                token = token[3:].strip()
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            key = key.strip().lower()
+            val = value.strip() or "-"
+            if key == "cultivo":
+                payload["cultivo"] = val.upper()
+            elif key == "variedad":
+                payload["variedad"] = val.upper()
+            elif key == "prompt":
+                payload["prompt_version"] = val
+            elif key == "source":
+                payload["prompt_source"] = val
+        return payload
+
+    def _actualizar_estado_boton_prompt_variedad(self) -> None:
+        cultivo = str(self._ultimo_prompt_contexto.get("cultivo", "*") or "*").strip().upper()
+        variedad = str(self._ultimo_prompt_contexto.get("variedad", "*") or "*").strip().upper()
+        prompt_source = str(self._ultimo_prompt_contexto.get("prompt_source", "no_informado") or "no_informado").strip()
+        razones: list[str] = []
+        if not cultivo or cultivo == "*":
+            razones.append("sin cultivo resuelto")
+        if not variedad or variedad == "*":
+            razones.append("sin variedad específica")
+        if prompt_source == "sqlite_exact":
+            razones.append("ya existe prompt específico activo (sqlite_exact)")
+        habilitado = len(razones) == 0
+        if hasattr(self, "btn_crear_prompt_variedad"):
+            self.btn_crear_prompt_variedad.config(state=("normal" if habilitado else "disabled"))
+        if hasattr(self, "crear_prompt_estado_var"):
+            if habilitado:
+                self.crear_prompt_estado_var.set(
+                    f"Crear prompt: listo para {cultivo}/{variedad}. Prompt actual source={prompt_source}."
+                )
+            else:
+                self.crear_prompt_estado_var.set("Crear prompt: deshabilitado (" + ", ".join(razones) + ").")
+
+    def _abrir_modal_crear_prompt_variedad(self) -> None:
+        self._actualizar_estado_boton_prompt_variedad()
+        if str(self.btn_crear_prompt_variedad.cget("state")) == "disabled":
+            messagebox.showinfo("Crear prompt para variedad", self.crear_prompt_estado_var.get(), parent=self)
+            return
+
+        task = "estimacion_calibres"
+        cultivo = str(self._ultimo_prompt_contexto.get("cultivo", "*") or "*").strip().upper()
+        variedad = str(self._ultimo_prompt_contexto.get("variedad", "*") or "*").strip().upper()
+        prompt_actual = str(self._ultimo_prompt_contexto.get("prompt_version", "-") or "-").strip()
+        source_actual = str(self._ultimo_prompt_contexto.get("prompt_source", "no_informado") or "no_informado").strip()
+        db_path = self.history_repo.db_path
+        try:
+            bases = list_prompt_bases(task=task, cultivo=cultivo, db_path=db_path)
+        except Exception as exc:
+            messagebox.showerror(
+                "Crear prompt para variedad",
+                f"No se pudieron listar prompts base desde {db_path}.\nDetalle: {exc}",
+                parent=self,
+            )
+            return
+        if not bases:
+            messagebox.showwarning(
+                "Crear prompt para variedad",
+                "No hay prompts base activos para copiar (cultivo ni global).",
+                parent=self,
+            )
+            return
+
+        modal = tk.Toplevel(self)
+        modal.title("Crear prompt específico para variedad")
+        modal.transient(self)
+        modal.grab_set()
+        modal.geometry("980x700")
+        modal.minsize(880, 640)
+        for col in range(2):
+            modal.columnconfigure(col, weight=(1 if col == 1 else 0))
+        modal.rowconfigure(7, weight=1)
+
+        ttk.Label(modal, text=f"task: {task}").grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 4))
+        ttk.Label(modal, text=f"cultivo actual: {cultivo}").grid(row=1, column=0, sticky="w", padx=12, pady=2)
+        ttk.Label(modal, text=f"variedad actual: {variedad}").grid(row=1, column=1, sticky="w", padx=12, pady=2)
+        ttk.Label(modal, text=f"prompt usado actualmente: {prompt_actual}").grid(
+            row=2, column=0, sticky="w", padx=12, pady=2
+        )
+        ttk.Label(modal, text=f"prompt_source actual: {source_actual}").grid(row=2, column=1, sticky="w", padx=12, pady=2)
+
+        ttk.Label(modal, text="Prompt base para copiar:").grid(row=3, column=0, sticky="w", padx=12, pady=(8, 2))
+        base_var = tk.StringVar(value=bases[0]["label"])
+        labels = [item["label"] for item in bases]
+        combo = ttk.Combobox(modal, textvariable=base_var, values=labels, state="readonly")
+        combo.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=(8, 2))
+
+        version_var = tk.StringVar(value=suggest_prompt_version(cultivo, variedad))
+        nombre_var = tk.StringVar(value=f"Prompt {cultivo} {variedad}")
+        descripcion_var = tk.StringVar(value=f"Copia inicial para ajuste de {variedad}.")
+
+        ttk.Label(modal, text="Nueva prompt_version:").grid(row=4, column=0, sticky="w", padx=12, pady=2)
+        ttk.Entry(modal, textvariable=version_var).grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=2)
+        ttk.Label(modal, text="Nombre:").grid(row=5, column=0, sticky="w", padx=12, pady=2)
+        ttk.Entry(modal, textvariable=nombre_var).grid(row=5, column=1, sticky="ew", padx=(0, 12), pady=2)
+        ttk.Label(modal, text="Descripción:").grid(row=6, column=0, sticky="w", padx=12, pady=2)
+        ttk.Entry(modal, textvariable=descripcion_var).grid(row=6, column=1, sticky="ew", padx=(0, 12), pady=2)
+
+        ttk.Label(modal, text="Texto del prompt (opcional editar):").grid(row=7, column=0, columnspan=2, sticky="w", padx=12)
+        txt_prompt = tk.Text(modal, wrap="word", height=18)
+        txt_prompt.grid(row=8, column=0, columnspan=2, sticky="nsew", padx=12, pady=(2, 6))
+
+        def _base_actual() -> dict[str, Any]:
+            selected = base_var.get().strip()
+            for item in bases:
+                if item["label"] == selected:
+                    return item
+            return bases[0]
+
+        def _refrescar_base(_evt: Any | None = None) -> None:
+            base = _base_actual()
+            txt_prompt.delete("1.0", "end")
+            txt_prompt.insert("1.0", str(base.get("texto_prompt", "") or ""))
+            if not descripcion_var.get().strip():
+                descripcion_var.set(str(base.get("descripcion", "") or "").strip())
+
+        combo.bind("<<ComboboxSelected>>", _refrescar_base)
+        _refrescar_base()
+
+        footer = ttk.Frame(modal)
+        footer.grid(row=9, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 12))
+        footer.columnconfigure(0, weight=1)
+
+        def _guardar() -> None:
+            ok, msg = create_prompt_for_variety(
+                db_path=db_path,
+                task=task,
+                cultivo=cultivo,
+                variedad=variedad,
+                prompt_version=version_var.get(),
+                nombre=nombre_var.get(),
+                descripcion=descripcion_var.get(),
+                texto_prompt=txt_prompt.get("1.0", "end").strip(),
+            )
+            if not ok:
+                messagebox.showwarning("Crear prompt para variedad", msg, parent=modal)
+                return
+            messagebox.showinfo("Crear prompt para variedad", msg, parent=modal)
+            modal.destroy()
+
+        ttk.Button(footer, text="Guardar copia", command=_guardar).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(footer, text="Cancelar", command=modal.destroy).grid(row=0, column=2, padx=(6, 0))
 
     def _limpiar_resultados_comparacion_calibres(self) -> None:
         if hasattr(self, "tree_comparacion_calibres"):
@@ -4338,6 +4668,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_ejecutar_flujo,
         ):
             btn.config(state=state)
+        if enabled:
+            self._actualizar_estado_boton_prompt_variedad()
+        elif hasattr(self, "btn_crear_prompt_variedad"):
+            self.btn_crear_prompt_variedad.config(state="disabled")
 
     @staticmethod
     def _build_distribucion_texto(distribucion: list[dict[str, Any]]) -> str:
@@ -4460,6 +4794,14 @@ class ObtencionCalibresWindow(BaseToolWindow):
             + (" | ".join(advertencias_unicas[:5]) if advertencias_unicas else "-")
         )
         self.ia_contexto_prompt_var.set(ultimo_prompt_ctx)
+        parsed_ctx = self._parse_prompt_ctx(ultimo_prompt_ctx)
+        self._ultimo_prompt_contexto = {
+            "task": "estimacion_calibres",
+            "cultivo": parsed_ctx["cultivo"],
+            "variedad": parsed_ctx["variedad"],
+            "prompt_version": parsed_ctx["prompt_version"],
+            "prompt_source": parsed_ctx["prompt_source"],
+        }
         avisos_unicos = []
         for aviso in avisos_prompt:
             if aviso not in avisos_unicos:
@@ -4484,6 +4826,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             if not hay_hist:
                 avisos_unicos.append("No hay histórico previo para la boleta actual.")
         self.ia_aviso_prompt_var.set("Aviso IA: " + (" | ".join(avisos_unicos[:3]) if avisos_unicos else "-"))
+        self._actualizar_estado_boton_prompt_variedad()
         self._actualizar_resumen_global()
 
     def _ejecutar_estimacion_calibres_ia(self) -> None:
