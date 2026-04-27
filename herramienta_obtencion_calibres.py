@@ -58,6 +58,37 @@ ESTADO_LEGACY_VALIDADO = "LEGACY_VALIDADO"
 METODO_CONSOLIDACION_MEDIA_SIMPLE = "media_simple"
 
 
+def normalizar_confianza_ia(valor: Any) -> float | None:
+    """Normaliza confianza IA a decimal [0.0, 1.0]."""
+    if valor is None:
+        return None
+    if isinstance(valor, str):
+        valor = valor.strip().replace("%", "").replace(",", ".")
+        if not valor:
+            return None
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return None
+    if numero < 0:
+        return 0.0
+    if numero <= 1:
+        return numero
+    if numero <= 10:
+        return numero / 10.0
+    if numero <= 100:
+        return numero / 100.0
+    return 1.0
+
+
+def formatear_confianza_ia(valor: Any, *, decimals: int = 1) -> str:
+    confianza = normalizar_confianza_ia(valor)
+    if confianza is None:
+        return "-"
+    dec = max(0, int(decimals))
+    return f"{confianza * 100:.{dec}f}%"
+
+
 def _normalize_prompt_slug(value: str) -> str:
     texto = str(value or "").strip().lower()
     texto = unicodedata.normalize("NFKD", texto)
@@ -266,12 +297,9 @@ def calcular_consolidado_muestreo(registros_fotos: list[dict[str, Any]]) -> dict
             suma_foto += valor
         if suma_foto > 0:
             fotos_aptas += 1
-        conf = row.get("confianza_ia")
-        try:
-            if conf is not None:
-                confianzas.append(float(conf))
-        except (TypeError, ValueError):
-            pass
+        conf = normalizar_confianza_ia(row.get("confianza_ia"))
+        if conf is not None:
+            confianzas.append(conf)
         prompt_version = str(row.get("prompt_version", "") or "").strip() or "sin_version"
         prompt_source = str(row.get("prompt_source", "") or "").strip() or "no_informado"
         prompt_version_counts[prompt_version] = prompt_version_counts.get(prompt_version, 0) + 1
@@ -1050,7 +1078,7 @@ class CalibresIAHistoryRepository:
                 return []
             if str(row.get("estado_registro", "")).strip().upper() != ESTADO_ESTIMACION_PREVIA:
                 return []
-            return [row]
+            return [self._normalizar_confianza_row(row)]
         sql = f"""
             SELECT *
             FROM comparaciones_calibres
@@ -1063,7 +1091,7 @@ class CalibresIAHistoryRepository:
                 rows = conn.execute(sql, (id_muestreo_norm, ESTADO_ESTIMACION_PREVIA)).fetchall()
         except sqlite3.OperationalError as exc:
             self._parse_tabla_no_existe(exc)
-        return [dict(row) for row in rows]
+        return [self._normalizar_confianza_row(dict(row)) for row in rows]
 
     def _connect_readonly(self) -> sqlite3.Connection:
         parent_dir, parent_exists = self._validate_parent_dir_exists()
@@ -1085,6 +1113,12 @@ class CalibresIAHistoryRepository:
         if "no such table" in str(exc).lower():
             raise LookupError("La tabla comparaciones_calibres no existe en la base histórica IA.") from exc
         raise exc
+
+    @staticmethod
+    def _normalizar_confianza_row(row: dict[str, Any]) -> dict[str, Any]:
+        if "confianza_ia" in row:
+            row["confianza_ia"] = normalizar_confianza_ia(row.get("confianza_ia"))
+        return row
 
     @staticmethod
     def _build_filtros_sql(
@@ -1208,7 +1242,7 @@ class CalibresIAHistoryRepository:
                 rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as exc:
             self._parse_tabla_no_existe(exc)
-        return [dict(row) for row in rows]
+        return [self._normalizar_confianza_row(dict(row)) for row in rows]
 
     def list_comparisons_for_bias(
         self,
@@ -1272,7 +1306,7 @@ class CalibresIAHistoryRepository:
                 rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as exc:
             self._parse_tabla_no_existe(exc)
-        return [dict(row) for row in rows]
+        return [self._normalizar_confianza_row(dict(row)) for row in rows]
 
     def get_comparison_detail(self, comparison_id: int) -> dict[str, Any] | None:
         self.ensure_schema()
@@ -1287,7 +1321,9 @@ class CalibresIAHistoryRepository:
                 row = conn.execute(sql, (comparison_id,)).fetchone()
         except sqlite3.OperationalError as exc:
             self._parse_tabla_no_existe(exc)
-        return dict(row) if row else None
+        if not row:
+            return None
+        return self._normalizar_confianza_row(dict(row))
 
     def get_summary(
         self,
@@ -1811,7 +1847,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                     row.get("prompt_version", "sin_version"),
                     row.get("prompt_source", "no_informado"),
                     row.get("estado_registro", "-"),
-                    self._fmt_number(row.get("confianza_ia")),
+                    formatear_confianza_ia(row.get("confianza_ia"), decimals=1),
                     row.get("calibre_dominante_ia", "-"),
                     row.get("calibre_dominante_real", "-"),
                     "pendiente"
@@ -2251,6 +2287,7 @@ class CalibresIAHistoryWindow(tk.Toplevel):
                 f"modelo_ia: {detail.get('modelo_ia', '-')}",
                 f"prompt_version: {str(detail.get('prompt_version', '') or '').strip() or 'sin_version'}",
                 f"prompt_source: {str(detail.get('prompt_source', '') or '').strip() or 'no_informado'}",
+                f"confianza_ia: {formatear_confianza_ia(detail.get('confianza_ia'), decimals=1)}",
                 f"cultivo: {str(detail.get('cultivo', '') or '').strip() or '-'}",
                 f"variedad: {str(detail.get('variedad', '') or '').strip() or '-'}",
                 "",
@@ -3565,7 +3602,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         return {
             "apta": apta_texto,
-            "confianza": parsed_output.get("confianza", "-"),
+            "confianza": normalizar_confianza_ia(parsed_output.get("confianza")),
             "oclusion": parsed_output.get("oclusion", "-"),
             "patron_visible": parsed_output.get("patron_visible", "-"),
             "box_centrado": parsed_output.get("box_centrado", "-"),
@@ -3693,7 +3730,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         return {
             "apta_para_estimacion": apta_texto,
-            "confianza": parsed.get("confianza", "-"),
+            "confianza": normalizar_confianza_ia(parsed.get("confianza")),
             "frutos_visibles_estimados": parsed.get("frutos_visibles_estimados", "-"),
             "calibre_dominante": parsed.get("calibre_dominante", "-"),
             "distribucion": distribucion,
@@ -4389,7 +4426,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "modelo_ia": str(raw_result.get("model", "") or "").strip() or "desconocido",
             "prompt_version": prompt_version,
             "prompt_source": prompt_source,
-            "confianza_ia": self._to_float_or_none(estimacion.get("confianza")),
+            "confianza_ia": normalizar_confianza_ia(estimacion.get("confianza")),
             "calibre_dominante_ia": str(comp_foto.get("calibre_dominante_ia", "") or "").strip(),
             "calibre_dominante_real": str(comp_foto.get("calibre_dominante_real", "") or "").strip(),
             "error_absoluto_medio": self._to_float_or_none(comp_foto.get("error_abs_medio")),
@@ -4451,7 +4488,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "modelo_ia": str(raw_result.get("model", "") or "").strip() or "desconocido",
             "prompt_version": prompt_version,
             "prompt_source": prompt_source,
-            "confianza_ia": self._to_float_or_none(estimacion.get("confianza")),
+            "confianza_ia": normalizar_confianza_ia(estimacion.get("confianza")),
             "calibre_dominante_ia": dominante_ia,
             "calibre_dominante_real": None,
             "error_absoluto_medio": None,
@@ -4622,7 +4659,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             else:
                 no_aptas += 1
 
-            conf = self._confianza_a_float(row.get("confianza"))
+            conf = normalizar_confianza_ia(row.get("confianza"))
             if conf is not None:
                 conf_values.append(conf)
 
@@ -4633,7 +4670,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 values=(
                     id_foto,
                     row.get("apta", "-"),
-                    row.get("confianza", "-"),
+                    formatear_confianza_ia(row.get("confianza"), decimals=1),
                     row.get("oclusion", "-"),
                     row.get("patron_visible", "-"),
                     row.get("estado", "-"),
@@ -4641,7 +4678,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             )
 
         total = len(resultados)
-        confianza_media = f"{(sum(conf_values) / len(conf_values)):.2f}" if conf_values else "-"
+        confianza_media = formatear_confianza_ia((sum(conf_values) / len(conf_values)) if conf_values else None, decimals=1)
         self.resumen_ia_lote_var.set(
             f"IA lote: evaluadas={total} | aptas={aptas} | no aptas={no_aptas} | errores={errores} | confianza media={confianza_media}"
         )
@@ -4720,7 +4757,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 if diagnostico:
                     advertencias.append(diagnostico)
 
-            conf = self._confianza_a_float(row.get("confianza"))
+            conf = normalizar_confianza_ia(row.get("confianza"))
             if conf is not None:
                 conf_values.append(conf)
 
@@ -4731,7 +4768,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 values=(
                     id_foto,
                     row.get("apta_para_estimacion", "-"),
-                    row.get("confianza", "-"),
+                    formatear_confianza_ia(row.get("confianza"), decimals=1),
                     row.get("frutos_visibles_estimados", "-"),
                     row.get("calibre_dominante", "-"),
                     self._build_distribucion_texto(row.get("distribucion", [])),
@@ -4761,7 +4798,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         "Puede crear un prompt específico para la variedad enviada si desea afinar el aprendizaje."
                     )
 
-        confianza_media = f"{(sum(conf_values) / len(conf_values)):.2f}" if conf_values else "-"
+        conf_media_norm = (sum(conf_values) / len(conf_values)) if conf_values else None
+        confianza_media = formatear_confianza_ia(conf_media_norm, decimals=1)
         consolidado_texto = "-"
         dominante_consolidado = "-"
         if consolidado and count_distribucion > 0:
@@ -4810,9 +4848,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             avisos_unicos.append("Algunas fotos no usan prompt_source=sqlite_exact.")
         if aptas < 3:
             avisos_unicos.append("Hay menos de 3 fotos aptas para consolidación.")
-        conf_media_num = self._confianza_a_float(confianza_media)
-        if conf_media_num is not None and conf_media_num < 70.0:
-            avisos_unicos.append("La confianza media del muestreo es inferior a 70.")
+        if conf_media_norm is not None and conf_media_norm < 0.70:
+            avisos_unicos.append("La confianza media del muestreo es inferior al 70%.")
         if hubo_fallback_internal:
             avisos_unicos.append("Al menos una foto usó fallback_internal.")
         if sin_prompt_especifico:
@@ -5356,9 +5393,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
         aptas = sum(1 for row in resultados.values() if not row.get("error") and row.get("apta") == "Sí")
         errores = sum(1 for row in resultados.values() if row.get("error"))
         no_aptas = max(len(resultados) - aptas - errores, 0)
-        conf_values = [self._confianza_a_float(row.get("confianza")) for row in resultados.values()]
+        conf_values = [normalizar_confianza_ia(row.get("confianza")) for row in resultados.values()]
         conf_validas = [item for item in conf_values if item is not None]
-        conf_media = f"{(sum(conf_validas) / len(conf_validas)):.2f}" if conf_validas else "-"
+        conf_media = formatear_confianza_ia((sum(conf_validas) / len(conf_validas)) if conf_validas else None, decimals=1)
         self.estado_var.set(f"Validación IA lote finalizada: {len(resultados)} foto(s) en {elapsed:.1f}s.")
         messagebox.showinfo(
             "Obtención calibres - Validación IA por lote",
@@ -5425,7 +5462,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         filas = [
             ("Apta", parsed["apta"]),
-            ("Confianza", parsed["confianza"]),
+            ("Confianza", formatear_confianza_ia(parsed.get("confianza"), decimals=1)),
             ("Oclusión", parsed["oclusion"]),
             ("Patrón visible", parsed["patron_visible"]),
             ("Box centrado", parsed["box_centrado"]),
@@ -5535,6 +5572,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             f"id_foto: {id_foto}\n"
             f"image_url: {image_url}\n"
             f"task: {task_enviada}\n"
+            f"confianza: {formatear_confianza_ia(row.get('confianza'), decimals=1)}\n"
             f"modelo: {modelo_ia}\n"
             f"prompt_version: {prompt_version}\n"
             f"prompt_source: {prompt_source}\n"
