@@ -142,6 +142,22 @@ class OpenAIGateway:
                 )
                 """
             )
+            columns = [str(row[1]).strip().lower() for row in conn.execute("PRAGMA table_info(prompts_ia)").fetchall()]
+            if "descripcion" not in columns:
+                conn.execute("ALTER TABLE prompts_ia ADD COLUMN descripcion TEXT")
+            if "es_default" not in columns:
+                conn.execute("ALTER TABLE prompts_ia ADD COLUMN es_default INTEGER DEFAULT 0")
+            if "fecha_modificacion" not in columns:
+                conn.execute("ALTER TABLE prompts_ia ADD COLUMN fecha_modificacion TEXT")
+            now = self._utc_now_iso()
+            conn.execute(
+                """
+                UPDATE prompts_ia
+                   SET fecha_modificacion = COALESCE(NULLIF(TRIM(fecha_modificacion), ''), fecha_actualizacion, fecha_creacion, ?)
+                 WHERE fecha_modificacion IS NULL OR TRIM(fecha_modificacion) = ''
+                """,
+                (now,),
+            )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_prompts_ia_task_cultivo_variedad_version "
                 "ON prompts_ia(task, cultivo, variedad, prompt_version)"
