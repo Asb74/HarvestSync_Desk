@@ -4919,8 +4919,24 @@ class ObtencionCalibresWindow(BaseToolWindow):
         resultados = self._get_estimacion_resultados_muestra_actual()
         acumulado: dict[str, float] = {}
         count = 0
-        for row in resultados.values():
-            if row.get("error") or row.get("apta_para_estimacion") != "Sí":
+        validaciones = self._get_ia_resultados_muestra_actual()
+        for id_foto, row in resultados.items():
+            if row.get("error"):
+                continue
+            incluir = row.get("apta_para_estimacion") == "Sí"
+            if not incluir:
+                modo_estimacion = str(row.get("modo_estimacion", "") or "").strip().lower()
+                validacion_foto = validaciones.get(id_foto, {})
+                validacion_apta = isinstance(validacion_foto, dict) and validacion_foto.get("apta") == "Sí"
+                patron_apoyo = bool(row.get("escala_fisica_fiable")) or bool(row.get("patron_detectado"))
+                frutos_visibles = self._to_int_or_none(row.get("frutos_visibles_estimados")) or 0
+                incluir = (
+                    modo_estimacion == "hibrido_cv_ia"
+                    and validacion_apta
+                    and patron_apoyo
+                    and frutos_visibles >= 8
+                )
+            if not incluir:
                 continue
             distribucion = row.get("distribucion", [])
             if not isinstance(distribucion, list):
@@ -5202,6 +5218,70 @@ class ObtencionCalibresWindow(BaseToolWindow):
         if total > 0 and (bajas / total) >= 0.4:
             advertencias.append("Alta proporción de mediciones CV con confianza baja.")
         return advertencias
+
+    @staticmethod
+    def _resolver_modo_estimacion(escala_fiable: bool, total_frutos_cv: int) -> str:
+        if total_frutos_cv >= 10:
+            return "cv_fuerte"
+        if escala_fiable:
+            return "hibrido_cv_ia"
+        return "visual_orientativo"
+
+    @staticmethod
+    def _aplicar_reglas_hibridas_estimacion(
+        parsed_estimacion: dict[str, Any],
+        *,
+        modo_estimacion: str,
+        escala_fisica_fiable: bool,
+        total_frutos_cv: int,
+    ) -> dict[str, Any]:
+        ajustado = dict(parsed_estimacion or {})
+        advertencias = [str(item).strip() for item in ajustado.get("advertencias", []) if str(item).strip()]
+        confianza = normalizar_confianza_ia(ajustado.get("confianza"))
+
+        if modo_estimacion == "cv_fuerte":
+            if confianza is None:
+                confianza = 0.75
+            confianza = max(0.70, min(0.90, confianza))
+        elif modo_estimacion == "hibrido_cv_ia":
+            advertencia_hibrida = (
+                "Pocos frutos medidos automáticamente; estimación apoyada en patrón físico e interpretación visual."
+            )
+            if advertencia_hibrida not in advertencias:
+                advertencias.append(advertencia_hibrida)
+            if ajustado.get("apta_para_estimacion") == "No":
+                ajustado["apta_para_estimacion"] = "Sí"
+            if confianza is None:
+                confianza = 0.60
+            confianza = max(0.55, min(0.70, confianza))
+        else:
+            advertencia_visual = "Escala física no fiable: estimación visual orientativa con menor certeza."
+            if advertencia_visual not in advertencias:
+                advertencias.append(advertencia_visual)
+            if confianza is None:
+                confianza = 0.45
+            confianza = max(0.35, min(0.65, confianza))
+
+        distribucion = ajustado.get("distribucion", [])
+        dominante = str(ajustado.get("calibre_dominante", "") or "").strip()
+        if dominante.lower() in {"", "-", "none", "null"} and isinstance(distribucion, list) and distribucion:
+            items_validos: list[tuple[str, float]] = []
+            for item in distribucion:
+                if not isinstance(item, dict):
+                    continue
+                calibre = str(item.get("calibre", "")).strip()
+                porcentaje = ObtencionCalibresWindow._confianza_a_float(item.get("porcentaje"))
+                if calibre and porcentaje is not None:
+                    items_validos.append((calibre, porcentaje))
+            if items_validos:
+                ajustado["calibre_dominante"] = max(items_validos, key=lambda row: row[1])[0]
+
+        ajustado["confianza"] = confianza
+        ajustado["advertencias"] = advertencias
+        ajustado["modo_estimacion"] = modo_estimacion
+        ajustado["total_frutos_cv"] = int(total_frutos_cv)
+        ajustado["escala_fisica_fiable"] = bool(escala_fisica_fiable)
+        return ajustado
 
     def _build_historial_row(self, id_foto: str, estimacion: dict[str, Any]) -> dict[str, Any]:
         comparacion = self._comparacion_ia_vs_calibrador
@@ -5860,20 +5940,34 @@ class ObtencionCalibresWindow(BaseToolWindow):
                                 rangos_calibres=rangos,
                             )
                         resumen_cv = self._resumen_medicion_cv(frutos_medidos_cv)
+                        modo_estimacion = self._resolver_modo_estimacion(
+                            True,
+                            int(resumen_cv.get("total_frutos_medidos", 0) or 0),
+                        )
                         contexto["frutos_medidos_cv"] = [item.to_dict() for item in frutos_medidos_cv]
                         contexto["resumen_medicion_cv"] = resumen_cv
                         contexto["advertencias_medicion_cv"] = self._advertencias_medicion_cv(True, frutos_medidos_cv)
-                        contexto["instruccion_escala"] = (
-                            "Usa obligatoriamente el patrón físico como escala real. "
-                            f"Diámetro real patrón: {patron_info['diametro_patron_mm']:.2f} mm. "
-                            f"Diámetro detectado: {float(patron_info['diametro_patron_px']):.2f} px. "
-                            f"Escala: {float(patron_info['mm_por_px']):.5f} mm/px. "
-                            "Usa frutos_medidos_cv como fuente principal de tamaño/calibre. "
-                            "La imagen solo valida oclusión/coherencia. "
-                            "No devuelvas CAL 8/CAL 9 si los diámetros medidos caen en CAL 0..CAL 3. "
-                            "Si hay conflicto entre visión general y medición CV, prioriza medición CV."
-                        )
+                        if modo_estimacion == "cv_fuerte":
+                            contexto["instruccion_escala"] = (
+                                "Usa obligatoriamente el patrón físico como escala real. "
+                                f"Diámetro real patrón: {patron_info['diametro_patron_mm']:.2f} mm. "
+                                f"Diámetro detectado: {float(patron_info['diametro_patron_px']):.2f} px. "
+                                f"Escala: {float(patron_info['mm_por_px']):.5f} mm/px. "
+                                "Con suficientes frutos medidos por CV, usa frutos_medidos_cv como fuente principal. "
+                                "No devuelvas CAL 8/CAL 9 si los diámetros medidos caen en CAL 0..CAL 3."
+                            )
+                        else:
+                            contexto["instruccion_escala"] = (
+                                "Usa obligatoriamente el patrón físico como escala real. "
+                                f"Diámetro real patrón: {patron_info['diametro_patron_mm']:.2f} mm. "
+                                f"Diámetro detectado: {float(patron_info['diametro_patron_px']):.2f} px. "
+                                f"Escala: {float(patron_info['mm_por_px']):.5f} mm/px. "
+                                "Si hay pocos frutos medidos por CV, usa esos datos solo como orientación y completa "
+                                "la estimación con análisis visual apoyado en el patrón físico y los rangos de calibres. "
+                                "No marques apta=false solo por tener pocos frutos medidos por CV."
+                            )
                     else:
+                        modo_estimacion = "visual_orientativo"
                         contexto["frutos_medidos_cv"] = []
                         contexto["resumen_medicion_cv"] = self._resumen_medicion_cv([])
                         contexto["advertencias_medicion_cv"] = self._advertencias_medicion_cv(False, [])
@@ -5881,6 +5975,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                             "La foto no dispone de escala física fiable. Ejecuta solo análisis visual IA "
                             "con confianza baja y explicita la limitación."
                         )
+                    contexto["modo_estimacion"] = modo_estimacion
                     LOGGER.info(
                         "[Estimación IA] foto=%s patron_detectado=%s diametro_px=%s mm_por_px=%s estado=%s",
                         id_foto,
@@ -5910,6 +6005,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         timeout_seconds=30,
                     )
                     parsed = self._parse_estimacion_ia_result(result)
+                    total_frutos_cv = int(self._resumen_medicion_cv(frutos_medidos_cv).get("total_frutos_medidos", 0) or 0)
+                    parsed = self._aplicar_reglas_hibridas_estimacion(
+                        parsed,
+                        modo_estimacion=modo_estimacion,
+                        escala_fisica_fiable=bool(patron_info["escala_fisica_fiable"]),
+                        total_frutos_cv=total_frutos_cv,
+                    )
                     row.update(parsed)
                     row["task_enviada"] = "estimacion_calibres"
                     row["image_url"] = image_url_for_ai
@@ -5921,6 +6023,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     row["escala_fisica_fiable"] = patron_info["escala_fisica_fiable"]
                     row["frutos_medidos_cv"] = [item.to_dict() for item in frutos_medidos_cv]
                     row["resumen_medicion_cv"] = self._resumen_medicion_cv(frutos_medidos_cv)
+                    row["modo_estimacion"] = modo_estimacion
                     advertencias_cv = self._advertencias_medicion_cv(bool(patron_info["escala_fisica_fiable"]), frutos_medidos_cv)
                     if advertencias_cv:
                         advertencias_row = [str(item).strip() for item in row.get("advertencias", []) if str(item).strip()]
@@ -6038,18 +6141,32 @@ class ObtencionCalibresWindow(BaseToolWindow):
                                 rangos_calibres=rangos,
                             )
                         resumen_cv = self._resumen_medicion_cv(frutos_medidos_cv)
-                        instruccion_escala = (
-                            "Usa obligatoriamente el patrón físico como escala real. "
-                            f"Diámetro real patrón: {escala_info['diametro_patron_mm']:.2f} mm. "
-                            f"Diámetro detectado: {float(escala_info['diametro_patron_px']):.2f} px. "
-                            f"Escala: {float(escala_info['mm_por_px']):.5f} mm/px. "
-                            "Usa frutos_medidos_cv como fuente principal de tamaño/calibre. "
-                            "La imagen solo valida oclusión/coherencia. "
-                            "No devuelvas CAL 8/CAL 9 si los diámetros medidos caen en CAL 0..CAL 3. "
-                            "Si hay conflicto entre visión general y medición CV, prioriza medición CV."
+                        modo_estimacion = self._resolver_modo_estimacion(
+                            True,
+                            int(resumen_cv.get("total_frutos_medidos", 0) or 0),
                         )
+                        if modo_estimacion == "cv_fuerte":
+                            instruccion_escala = (
+                                "Usa obligatoriamente el patrón físico como escala real. "
+                                f"Diámetro real patrón: {escala_info['diametro_patron_mm']:.2f} mm. "
+                                f"Diámetro detectado: {float(escala_info['diametro_patron_px']):.2f} px. "
+                                f"Escala: {float(escala_info['mm_por_px']):.5f} mm/px. "
+                                "Con suficientes frutos medidos por CV, usa frutos_medidos_cv como fuente principal. "
+                                "No devuelvas CAL 8/CAL 9 si los diámetros medidos caen en CAL 0..CAL 3."
+                            )
+                        else:
+                            instruccion_escala = (
+                                "Usa obligatoriamente el patrón físico como escala real. "
+                                f"Diámetro real patrón: {escala_info['diametro_patron_mm']:.2f} mm. "
+                                f"Diámetro detectado: {float(escala_info['diametro_patron_px']):.2f} px. "
+                                f"Escala: {float(escala_info['mm_por_px']):.5f} mm/px. "
+                                "Si hay pocos frutos medidos por CV, usa esos datos solo como orientación y completa "
+                                "la estimación con análisis visual apoyado en el patrón físico y los rangos de calibres. "
+                                "No marques apta=false solo por tener pocos frutos medidos por CV."
+                            )
                     else:
                         resumen_cv = self._resumen_medicion_cv([])
+                        modo_estimacion = "visual_orientativo"
                         instruccion_escala = (
                             "La foto no dispone de escala física fiable. Ejecuta solo análisis visual IA "
                             "con confianza baja y explicita la limitación."
@@ -6066,6 +6183,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         "datos_escala_foto": escala_info,
                         "frutos_medidos_cv": [item.to_dict() for item in frutos_medidos_cv],
                         "resumen_medicion_cv": resumen_cv,
+                        "modo_estimacion": modo_estimacion,
                         "advertencias_medicion_cv": self._advertencias_medicion_cv(
                             bool(escala_info["escala_fisica_fiable"]),
                             frutos_medidos_cv,
@@ -6097,6 +6215,13 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
                     parsed_validacion = self._parse_validacion_ia_result(result)
                     parsed_estimacion = self._parse_estimacion_ia_result(result)
+                    total_frutos_cv = int(resumen_cv.get("total_frutos_medidos", 0) or 0)
+                    parsed_estimacion = self._aplicar_reglas_hibridas_estimacion(
+                        parsed_estimacion,
+                        modo_estimacion=modo_estimacion,
+                        escala_fisica_fiable=bool(escala_info["escala_fisica_fiable"]),
+                        total_frutos_cv=total_frutos_cv,
+                    )
 
                     row_validacion = {
                         "apta": parsed_validacion.get("apta", "-"),
@@ -6125,6 +6250,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     row_estimacion["escala_fisica_fiable"] = escala_info["escala_fisica_fiable"]
                     row_estimacion["frutos_medidos_cv"] = [item.to_dict() for item in frutos_medidos_cv]
                     row_estimacion["resumen_medicion_cv"] = resumen_cv
+                    row_estimacion["modo_estimacion"] = modo_estimacion
                     advertencias_cv = self._advertencias_medicion_cv(bool(escala_info["escala_fisica_fiable"]), frutos_medidos_cv)
                     if advertencias_cv:
                         advertencias_row = [str(item).strip() for item in row_estimacion.get("advertencias", []) if str(item).strip()]
