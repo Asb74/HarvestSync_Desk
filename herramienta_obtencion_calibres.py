@@ -3008,7 +3008,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         tab_validacion_ia.columnconfigure(0, weight=1)
         toolbar_ia = ttk.Frame(tab_validacion_ia)
         toolbar_ia.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        toolbar_ia.columnconfigure(9, weight=1)
+        toolbar_ia.columnconfigure(10, weight=1)
         self.btn_validacion_ia = ttk.Button(toolbar_ia, text="🤖 Validación IA", command=self._ejecutar_validacion_ia)
         self.btn_validacion_ia.grid(row=0, column=0, padx=(0, 6))
         self.btn_validar_lote_ia = ttk.Button(toolbar_ia, text="🤖 Validar lote IA", command=self._validar_lote_ia)
@@ -3021,42 +3021,48 @@ class ObtencionCalibresWindow(BaseToolWindow):
             command=self._ejecutar_estimacion_calibres_ia,
         )
         self.btn_estimacion_calibres_ia.grid(row=0, column=3, padx=(0, 6))
+        self.btn_analisis_completo_ia = ttk.Button(
+            toolbar_ia,
+            text="🧠 Análisis completo IA",
+            command=self._ejecutar_analisis_calibres_completo_ia,
+        )
+        self.btn_analisis_completo_ia.grid(row=0, column=4, padx=(0, 6))
         self.btn_ver_detalle_estimacion_ia = ttk.Button(
             toolbar_ia,
             text="📄 Ver detalle IA",
             command=self._ver_detalle_estimacion_ia_seleccionada,
         )
-        self.btn_ver_detalle_estimacion_ia.grid(row=0, column=4, padx=(0, 6))
+        self.btn_ver_detalle_estimacion_ia.grid(row=0, column=5, padx=(0, 6))
         self.btn_guardar_estimacion_previa = ttk.Button(
             toolbar_ia,
             text="💾 Guardar estimación previa",
             command=self._guardar_estimacion_previa,
         )
-        self.btn_guardar_estimacion_previa.grid(row=0, column=5, padx=(0, 6))
+        self.btn_guardar_estimacion_previa.grid(row=0, column=6, padx=(0, 6))
         self.btn_comparar_calibrador = ttk.Button(
             toolbar_ia,
             text="📊 Comparar IA vs calibrador",
             command=self._comparar_ia_vs_calibrador,
         )
-        self.btn_comparar_calibrador.grid(row=0, column=6, padx=(0, 6))
+        self.btn_comparar_calibrador.grid(row=0, column=7, padx=(0, 6))
         self.btn_guardar_historico = ttk.Button(
             toolbar_ia,
             text="💾 Guardar comparación histórico",
             command=self._guardar_comparacion_historico,
         )
-        self.btn_guardar_historico.grid(row=0, column=7, padx=(0, 6))
+        self.btn_guardar_historico.grid(row=0, column=8, padx=(0, 6))
         self.btn_ver_historico_ia = ttk.Button(
             toolbar_ia,
             text="📚 Ver histórico IA",
             command=self._abrir_panel_historico_ia,
         )
-        self.btn_ver_historico_ia.grid(row=0, column=8, padx=(0, 6))
+        self.btn_ver_historico_ia.grid(row=0, column=9, padx=(0, 6))
         self.btn_gestion_prompts = ttk.Button(
             toolbar_ia,
             text="🧩 Gestión de Prompts",
             command=self._abrir_gestion_prompts,
         )
-        self.btn_gestion_prompts.grid(row=0, column=9, padx=(0, 6))
+        self.btn_gestion_prompts.grid(row=0, column=10, padx=(0, 6))
 
         ia_frame = ttk.LabelFrame(tab_validacion_ia, text="Resultados IA por foto", padding=6)
         ia_frame.grid(row=1, column=0, sticky="nsew")
@@ -4110,17 +4116,45 @@ class ObtencionCalibresWindow(BaseToolWindow):
         return f"{url_base}/fotos/{ruta_limpia}"
 
     @staticmethod
+    def _extraer_bloques_analisis_calibres(parsed_output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(parsed_output, dict):
+            return {}, {}
+        validacion = parsed_output.get("validacion_foto")
+        estimacion = parsed_output.get("estimacion_calibres")
+        validacion_dict = validacion if isinstance(validacion, dict) else {}
+        estimacion_dict = estimacion if isinstance(estimacion, dict) else {}
+
+        if validacion_dict or estimacion_dict:
+            return validacion_dict, estimacion_dict
+
+        claves_validacion = {"apta", "oclusion", "patron_visible", "box_centrado", "alertas", "recomendacion"}
+        claves_estimacion = {
+            "apta_para_estimacion",
+            "frutos_visibles_estimados",
+            "calibre_dominante",
+            "distribucion",
+            "advertencias",
+        }
+        if any(clave in parsed_output for clave in claves_validacion):
+            validacion_dict = dict(parsed_output)
+        if any(clave in parsed_output for clave in claves_estimacion):
+            estimacion_dict = dict(parsed_output)
+        return validacion_dict, estimacion_dict
+
+    @staticmethod
     def _parse_validacion_ia_result(result: dict[str, Any]) -> dict[str, Any]:
         """Parsea result['output_text'] como JSON y devuelve datos listos para UI."""
         output_text = result.get("output_text", "")
         parsed_output = ObtencionCalibresWindow._parse_output_json(output_text)
-        alertas = parsed_output.get("alertas", [])
+        validacion_output, _estimacion_output = ObtencionCalibresWindow._extraer_bloques_analisis_calibres(parsed_output)
+        parsed_validacion = validacion_output if validacion_output else parsed_output
+        alertas = parsed_validacion.get("alertas", [])
         if isinstance(alertas, str):
             alertas = [alertas]
         if not isinstance(alertas, list):
             alertas = [str(alertas)]
 
-        apta_val = parsed_output.get("apta")
+        apta_val = parsed_validacion.get("apta")
         if isinstance(apta_val, bool):
             apta_texto = "Sí" if apta_val else "No"
         else:
@@ -4128,18 +4162,18 @@ class ObtencionCalibresWindow(BaseToolWindow):
 
         return {
             "apta": apta_texto,
-            "confianza": normalizar_confianza_ia(parsed_output.get("confianza")),
-            "oclusion": parsed_output.get("oclusion", "-"),
-            "patron_visible": parsed_output.get("patron_visible", "-"),
-            "box_centrado": parsed_output.get("box_centrado", "-"),
-            "resumen": parsed_output.get("resumen", "-"),
+            "confianza": normalizar_confianza_ia(parsed_validacion.get("confianza")),
+            "oclusion": parsed_validacion.get("oclusion", "-"),
+            "patron_visible": parsed_validacion.get("patron_visible", "-"),
+            "box_centrado": parsed_validacion.get("box_centrado", "-"),
+            "resumen": parsed_validacion.get("resumen", "-"),
             "alertas": alertas,
-            "recomendacion": parsed_output.get("recomendacion", "-"),
+            "recomendacion": parsed_validacion.get("recomendacion", "-"),
             "modelo": result.get("model", "-"),
             "raw_id": result.get("raw_id", "-"),
-            "json_parse_ok": bool(parsed_output),
+            "json_parse_ok": bool(parsed_validacion),
             "output_text_original": output_text,
-            "json_parseado": parsed_output,
+            "json_parseado": parsed_validacion,
         }
 
     @staticmethod
@@ -4295,7 +4329,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 "es_valida": False,
             }
 
-        normalized = ObtencionCalibresWindow._normalizar_estimacion_calibres_ia(parsed_output)
+        _validacion_output, estimacion_output = ObtencionCalibresWindow._extraer_bloques_analisis_calibres(parsed_output)
+        parsed_estimacion = estimacion_output if estimacion_output else parsed_output
+        normalized = ObtencionCalibresWindow._normalizar_estimacion_calibres_ia(parsed_estimacion)
         faltantes = normalized.get("campos_faltantes", [])
         es_valida = bool(normalized.get("es_valida"))
         diagnostico = ""
@@ -4307,7 +4343,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         return {
             **normalized,
             "json_parse_ok": True,
-            "json_parseado": parsed_output,
+            "json_parseado": parsed_estimacion,
             "output_text_original": output_text,
             "diagnostico": diagnostico,
             "error_tipo": error_tipo,
@@ -5326,6 +5362,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             self.btn_validar_lote_ia,
             self.btn_usar_solo_aptas_ia,
             self.btn_estimacion_calibres_ia,
+            self.btn_analisis_completo_ia,
             self.btn_ver_detalle_estimacion_ia,
             self.btn_guardar_estimacion_previa,
             self.btn_comparar_calibrador,
@@ -5691,6 +5728,184 @@ class ObtencionCalibresWindow(BaseToolWindow):
                 finally:
                     resultados_estimacion[id_foto] = row
                     self.after(0, lambda i=idx: self.estado_var.set(f"Estimación IA experimental {i}/{len(ids_candidatas)}..."))
+                    self.after(0, self._pintar_resultados_estimacion_ia)
+
+            self.after(0, self._on_estimacion_ia_finalizada)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ejecutar_analisis_calibres_completo_ia(self) -> None:
+        if self._ai_estimacion_en_curso or self._ai_lote_en_curso or self._ai_validacion_en_curso:
+            return
+        if not self._current_muestra_id:
+            messagebox.showinfo("Obtención calibres", "Seleccione una muestra para ejecutar el análisis completo IA.", parent=self)
+            return
+
+        ids_seleccionadas = set(self._selected_fotos_by_muestra.get(self._current_muestra_id, set()))
+        if not ids_seleccionadas:
+            messagebox.showwarning("Obtención calibres", "No hay fotos seleccionadas.", parent=self)
+            return
+
+        cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+        muestra = next((item for item in self._muestras if item["id_muestra"] == self._current_muestra_id), None)
+        cultivo = str(muestra.get("cultivo", "")).strip() if muestra else ""
+        cultivo_payload = self._resolver_cultivo_ia()
+        variedad = self._resolver_variedad_ia(cultivo_payload)
+        rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
+        diametro_patron = float(self._config.diametro_patron_mm) if self._config else 0.0
+        if not rangos:
+            messagebox.showwarning(
+                "Obtención calibres",
+                f"No hay rangos de calibres configurados para cultivo '{cultivo or '-'}'.",
+                parent=self,
+            )
+            return
+        service_url, _source, resolve_error = self.data_service.resolve_url_servicio_ia()
+        if not service_url:
+            messagebox.showerror("Obtención calibres", f"No hay URL de servicio IA: {resolve_error or '-'}", parent=self)
+            return
+
+        self._ai_estimacion_en_curso = True
+        self._set_controles_lote_ia_habilitados(False)
+        self.estado_var.set(f"Análisis completo IA 0/{len(ids_seleccionadas)}...")
+        resultados_validacion = self._get_ia_resultados_muestra_actual()
+        resultados_estimacion = self._get_estimacion_resultados_muestra_actual()
+
+        def worker() -> None:
+            for idx, id_foto in enumerate(sorted(ids_seleccionadas), start=1):
+                row_validacion: dict[str, Any] = {
+                    "apta": "-",
+                    "confianza": "-",
+                    "oclusion": "-",
+                    "patron_visible": "-",
+                    "estado": "Error servicio IA",
+                    "error": True,
+                }
+                row_estimacion: dict[str, Any] = {
+                    "apta_para_estimacion": "-",
+                    "confianza": "-",
+                    "frutos_visibles_estimados": "-",
+                    "calibre_dominante": "-",
+                    "distribucion": [],
+                    "advertencias": [],
+                    "resumen": "-",
+                    "estado": "Error servicio IA",
+                    "error": True,
+                    "task_enviada": "analisis_calibres_completo",
+                }
+                try:
+                    card = cards_by_id.get(id_foto)
+                    if not card:
+                        raise ValueError("Foto no cargada en memoria.")
+                    ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+                    image_url_for_ai = self._build_image_url_for_ai(ruta_local)
+                    if not image_url_for_ai:
+                        raise ValueError("No se pudo construir image_url.")
+
+                    escala_info = self._obtener_o_detectar_escala_foto({"id_foto": id_foto})
+                    if escala_info["escala_fisica_fiable"]:
+                        instruccion_escala = (
+                            "Usa obligatoriamente el patrón físico como escala real. "
+                            f"Diámetro real patrón: {escala_info['diametro_patron_mm']:.2f} mm. "
+                            f"Diámetro detectado: {float(escala_info['diametro_patron_px']):.2f} px. "
+                            f"Escala: {float(escala_info['mm_por_px']):.5f} mm/px. "
+                            "Compara el diámetro ecuatorial de frutos completos contra los rangos."
+                        )
+                    else:
+                        instruccion_escala = "La foto no dispone de escala física fiable. Reducir confianza de la estimación."
+
+                    contexto = {
+                        "tipo_tarea": "analisis_calibres_completo",
+                        "cultivo": cultivo_payload,
+                        "variedad": variedad,
+                        "diametro_patron_mm": diametro_patron,
+                        "rangos_calibres": rangos,
+                        "id_foto": id_foto,
+                        "image_url": image_url_for_ai,
+                        "datos_escala_foto": escala_info,
+                        "instruccion_escala": instruccion_escala,
+                        "respuesta_esperada": {
+                            "formato": "json_estricto",
+                            "bloques": ["validacion_foto", "estimacion_calibres"],
+                        },
+                    }
+                    LOGGER.info(
+                        "Análisis completo IA request: id_foto=%s task=%s cultivo=%s variedad=%s patron=%s mm_px=%s",
+                        id_foto,
+                        "analisis_calibres_completo",
+                        cultivo_payload,
+                        variedad,
+                        contexto["datos_escala_foto"]["patron_detectado"],
+                        contexto["datos_escala_foto"]["mm_por_px"],
+                    )
+                    result = call_analyze_image(
+                        server_url=service_url,
+                        image_url=image_url_for_ai,
+                        task="analisis_calibres_completo",
+                        context=json.dumps(contexto, ensure_ascii=False),
+                        cultivo=cultivo_payload,
+                        variedad=variedad,
+                        timeout_seconds=35,
+                    )
+
+                    parsed_validacion = self._parse_validacion_ia_result(result)
+                    parsed_estimacion = self._parse_estimacion_ia_result(result)
+
+                    row_validacion = {
+                        "apta": parsed_validacion.get("apta", "-"),
+                        "confianza": parsed_validacion.get("confianza", "-"),
+                        "oclusion": parsed_validacion.get("oclusion", "-"),
+                        "patron_visible": parsed_validacion.get("patron_visible", "-"),
+                        "estado": "OK",
+                        "error": False,
+                        "image_url": image_url_for_ai,
+                        "raw_result": result,
+                        "parsed": parsed_validacion,
+                        "task_enviada": "analisis_calibres_completo",
+                    }
+                    if parsed_validacion.get("apta") not in ("Sí", "No"):
+                        row_validacion["estado"] = "Respuesta IA sin campos esperados"
+                        row_validacion["error"] = True
+
+                    row_estimacion.update(parsed_estimacion)
+                    row_estimacion["task_enviada"] = "analisis_calibres_completo"
+                    row_estimacion["image_url"] = image_url_for_ai
+                    row_estimacion["id_foto"] = id_foto
+                    row_estimacion["patron_detectado"] = escala_info["patron_detectado"]
+                    row_estimacion["diametro_patron_px"] = escala_info["diametro_patron_px"]
+                    row_estimacion["mm_por_px"] = escala_info["mm_por_px"]
+                    row_estimacion["estado_patron"] = escala_info["estado_deteccion_patron"]
+                    row_estimacion["escala_fisica_fiable"] = escala_info["escala_fisica_fiable"]
+                    row_estimacion["error"] = not bool(parsed_estimacion.get("es_valida"))
+                    if not escala_info["escala_fisica_fiable"]:
+                        advertencias_row = [str(item).strip() for item in row_estimacion.get("advertencias", []) if str(item).strip()]
+                        if "Foto estimada sin escala física fiable." not in advertencias_row:
+                            advertencias_row.append("Foto estimada sin escala física fiable.")
+                        row_estimacion["advertencias"] = advertencias_row
+                    if row_estimacion["error"]:
+                        error_tipo = str(parsed_estimacion.get("error_tipo", "")).strip()
+                        if error_tipo == "parse":
+                            row_estimacion["estado"] = "JSON IA no parseable"
+                        elif error_tipo == "campos":
+                            row_estimacion["estado"] = "Respuesta IA sin campos esperados"
+                        else:
+                            row_estimacion["estado"] = parsed_estimacion.get("diagnostico") or "Respuesta IA sin campos esperados"
+                    else:
+                        row_estimacion["estado"] = "OK"
+                    row_estimacion["raw_result"] = result
+                except Exception as exc:  # noqa: BLE001
+                    row_validacion["estado"] = "Error servicio IA"
+                    row_validacion["error"] = True
+                    row_validacion["diagnostico"] = f"Error servicio IA: {exc}"
+                    row_validacion["task_enviada"] = "analisis_calibres_completo"
+                    row_estimacion["estado"] = "Error servicio IA"
+                    row_estimacion["diagnostico"] = f"Error servicio IA: {exc}"
+                    row_estimacion["error"] = True
+                finally:
+                    resultados_validacion[id_foto] = row_validacion
+                    resultados_estimacion[id_foto] = row_estimacion
+                    self.after(0, lambda i=idx: self.estado_var.set(f"Análisis completo IA {i}/{len(ids_seleccionadas)}..."))
+                    self.after(0, self._pintar_resultados_ia)
                     self.after(0, self._pintar_resultados_estimacion_ia)
 
             self.after(0, self._on_estimacion_ia_finalizada)

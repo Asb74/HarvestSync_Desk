@@ -59,6 +59,53 @@ class OpenAIGateway:
         return api_key
 
     @staticmethod
+    def fallback_analisis_calibres_completo_prompt(context: str) -> str:
+        return (
+            "Eres un asistente experto en control de calidad agrícola, calibrado comercial de cítricos y análisis visual de boxes de fruta.\n\n"
+            "Tarea:\n"
+            "Realiza en una sola respuesta:\n"
+            "1. Validación de la foto para análisis de calibres.\n"
+            "2. Estimación experimental de distribución de calibres.\n\n"
+            "Contexto técnico recibido desde HarvestSync:\n"
+            f"{context or 'sin contexto'}\n\n"
+            "Reglas de validación:\n"
+            "- La foto puede ser apta aunque tenga oclusión media.\n"
+            "- Marca no apta solo si está desenfocada, sin fruta suficiente, sin box usable o sin condiciones mínimas.\n"
+            "- patron_visible indica si visualmente se aprecia patrón, pero no sustituye a la escala física.\n\n"
+            "Reglas de estimación:\n"
+            "- Usa los rangos de calibres incluidos en el contexto.\n"
+            "- Usa obligatoriamente datos_escala_foto si escala_fisica_fiable=true.\n"
+            "- Si escala_fisica_fiable=false, la estimación puede hacerse, pero con menor confianza y advertencia.\n"
+            "- No mezcles podrido/destrío con calibres.\n"
+            "- CAL 9 es calibre independiente.\n"
+            "- La distribución debe sumar aproximadamente 100.\n"
+            "- No inventes precisión exacta fruto a fruto.\n"
+            "- Si hay oclusión, reparte entre calibres próximos.\n\n"
+            "Devuelve únicamente JSON estricto, sin markdown:\n"
+            "{"
+            "\"validacion_foto\": {"
+            "\"apta\": true,"
+            "\"confianza\": 0.90,"
+            "\"oclusion\": \"baja|media|alta\","
+            "\"patron_visible\": true,"
+            "\"box_centrado\": true,"
+            "\"resumen\": \"texto breve\","
+            "\"alertas\": [],"
+            "\"recomendacion\": \"texto breve\""
+            "},"
+            "\"estimacion_calibres\": {"
+            "\"apta_para_estimacion\": true,"
+            "\"confianza\": 0.75,"
+            "\"frutos_visibles_estimados\": 0,"
+            "\"calibre_dominante\": \"CAL X\","
+            "\"distribucion\": [{\"calibre\": \"CAL X\", \"porcentaje\": 0}],"
+            "\"advertencias\": [],"
+            "\"resumen\": \"texto breve\""
+            "}"
+            "}"
+        )
+
+    @staticmethod
     def _fallback_prompt(task: str, context: str) -> str:
         if task == "validacion_foto":
             return (
@@ -113,6 +160,8 @@ class OpenAIGateway:
                 "- Si apta_para_estimacion=false, devuelve distribucion vacía o muy limitada y explica en advertencias.\n"
                 f"Tarea={task}. Contexto={context or 'sin contexto'}"
             )
+        if task == "analisis_calibres_completo":
+            return OpenAIGateway.fallback_analisis_calibres_completo_prompt(context)
 
         base_prompt = (
             "Eres un asistente para control de calidad agrícola. "
