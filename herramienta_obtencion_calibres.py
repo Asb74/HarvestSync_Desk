@@ -104,6 +104,17 @@ def suggest_prompt_version(cultivo: str, variedad: str) -> str:
     return f"v1_{cultivo_slug}_{variedad_slug}"
 
 
+def suggest_prompt_version_for_task(task: str, cultivo: str, variedad: str) -> str:
+    task_slug = _normalize_prompt_slug(task) or "task"
+    cultivo_slug = _normalize_prompt_slug(cultivo) or "cultivo"
+    variedad_slug = _normalize_prompt_slug(variedad) or "variedad"
+    if task_slug == "analisis_calibres_completo":
+        return f"v1_analisis_completo_{variedad_slug}"
+    if task_slug == "estimacion_calibres":
+        return f"v1_{cultivo_slug}_{variedad_slug}"
+    return f"v1_{task_slug}_{cultivo_slug}_{variedad_slug}"
+
+
 def list_prompt_bases(task: str, cultivo: str, db_path: str) -> list[dict[str, Any]]:
     task_norm = str(task or "").strip() or "estimacion_calibres"
     cultivo_norm = str(cultivo or "").strip().upper() or "*"
@@ -195,7 +206,9 @@ def create_prompt_for_variety(
     descripcion: str,
     texto_prompt: str,
 ) -> tuple[bool, str]:
-    task_norm = str(task or "").strip() or "estimacion_calibres"
+    task_norm = str(task or "").strip()
+    if not task_norm:
+        return False, "Task inválido para crear prompt específico."
     cultivo_norm = str(cultivo or "").strip().upper()
     variedad_norm = str(variedad or "").strip().upper()
     version_norm = _normalize_prompt_slug(prompt_version)
@@ -301,30 +314,56 @@ class PromptSQLiteRepository:
             )
             conn.commit()
 
-    def list_prompts(self, task: str) -> list[dict[str, Any]]:
-        task_norm = str(task or "").strip() or "estimacion_calibres"
+    def list_prompts(self, task: str | None = None) -> list[dict[str, Any]]:
+        task_norm = str(task or "").strip()
+        all_tasks = task is None or task_norm in {"", "*", "TODOS"}
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    id,
-                    task,
-                    cultivo,
-                    variedad,
-                    prompt_version,
-                    COALESCE(activo, 1) AS activo,
-                    COALESCE(es_default, 0) AS es_default,
-                    COALESCE(NULLIF(TRIM(fecha_modificacion), ''), fecha_actualizacion, fecha_creacion, '') AS fecha_modificacion,
-                    COALESCE(descripcion, '') AS descripcion,
-                    COALESCE(nombre, '') AS nombre,
-                    COALESCE(texto_prompt, '') AS texto_prompt
-                FROM prompts_ia
-                WHERE task = ?
-                ORDER BY cultivo ASC, variedad ASC, id DESC
-                """,
-                (task_norm,),
-            ).fetchall()
+            if all_tasks:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id,
+                        task,
+                        cultivo,
+                        variedad,
+                        prompt_version,
+                        COALESCE(activo, 1) AS activo,
+                        COALESCE(es_default, 0) AS es_default,
+                        COALESCE(NULLIF(TRIM(fecha_modificacion), ''), fecha_actualizacion, fecha_creacion, '') AS fecha_modificacion,
+                        COALESCE(descripcion, '') AS descripcion,
+                        COALESCE(nombre, '') AS nombre,
+                        COALESCE(texto_prompt, '') AS texto_prompt
+                    FROM prompts_ia
+                    ORDER BY task ASC, cultivo ASC, variedad ASC, id DESC
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id,
+                        task,
+                        cultivo,
+                        variedad,
+                        prompt_version,
+                        COALESCE(activo, 1) AS activo,
+                        COALESCE(es_default, 0) AS es_default,
+                        COALESCE(NULLIF(TRIM(fecha_modificacion), ''), fecha_actualizacion, fecha_creacion, '') AS fecha_modificacion,
+                        COALESCE(descripcion, '') AS descripcion,
+                        COALESCE(nombre, '') AS nombre,
+                        COALESCE(texto_prompt, '') AS texto_prompt
+                    FROM prompts_ia
+                    WHERE task = ?
+                    ORDER BY task ASC, cultivo ASC, variedad ASC, id DESC
+                    """,
+                    (task_norm,),
+                ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_tasks(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT DISTINCT task FROM prompts_ia ORDER BY task").fetchall()
+        return [str(row["task"]).strip() for row in rows if str(row["task"] or "").strip()]
 
     def get_prompt(self, prompt_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -345,15 +384,29 @@ class PromptSQLiteRepository:
             ).fetchone()
         return dict(row) if row else None
 
-    def update_prompt(self, *, prompt_id: int, cultivo: str, variedad: str, prompt_version: str, descripcion: str, texto_prompt: str) -> None:
+    def update_prompt(
+        self,
+        *,
+        prompt_id: int,
+        task: str,
+        cultivo: str,
+        variedad: str,
+        prompt_version: str,
+        descripcion: str,
+        texto_prompt: str,
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        task_norm = str(task or "").strip()
+        if not task_norm:
+            raise ValueError("El task es obligatorio.")
         cultivo_norm = str(cultivo or "").strip().upper() or "*"
         variedad_norm = str(variedad or "").strip().upper() or "*"
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE prompts_ia
-                   SET cultivo = ?,
+                   SET task = ?,
+                       cultivo = ?,
                        variedad = ?,
                        prompt_version = ?,
                        descripcion = ?,
@@ -362,7 +415,17 @@ class PromptSQLiteRepository:
                        fecha_actualizacion = ?
                  WHERE id = ?
                 """,
-                (cultivo_norm, variedad_norm, str(prompt_version).strip(), str(descripcion or "").strip(), str(texto_prompt), now, now, int(prompt_id)),
+                (
+                    task_norm,
+                    cultivo_norm,
+                    variedad_norm,
+                    str(prompt_version).strip(),
+                    str(descripcion or "").strip(),
+                    str(texto_prompt),
+                    now,
+                    now,
+                    int(prompt_id),
+                ),
             )
             conn.commit()
 
@@ -379,6 +442,9 @@ class PromptSQLiteRepository:
         es_default: int = 0,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        task_norm = str(task or "").strip()
+        if not task_norm:
+            raise ValueError("El task es obligatorio.")
         cultivo_norm = str(cultivo or "").strip().upper() or "*"
         variedad_norm = str(variedad or "").strip().upper() or "*"
         version = str(prompt_version or "").strip()
@@ -391,7 +457,7 @@ class PromptSQLiteRepository:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    str(task or "").strip() or "estimacion_calibres",
+                    task_norm,
                     cultivo_norm,
                     variedad_norm,
                     version,
@@ -425,7 +491,7 @@ class PromptSQLiteRepository:
 class PromptManagerService:
     """Lógica de negocio para edición/versionado de prompts."""
 
-    def __init__(self, repository: PromptSQLiteRepository, task: str = "estimacion_calibres") -> None:
+    def __init__(self, repository: PromptSQLiteRepository, task: str | None = None) -> None:
         self.repository = repository
         self.task = task
 
@@ -434,6 +500,9 @@ class PromptManagerService:
 
     def list_rows(self) -> list[dict[str, Any]]:
         return self.repository.list_prompts(self.task)
+
+    def list_tasks(self) -> list[str]:
+        return self.repository.list_tasks()
 
     def get_row(self, prompt_id: int) -> dict[str, Any] | None:
         return self.repository.get_prompt(prompt_id)
@@ -447,9 +516,20 @@ class PromptManagerService:
             return f"{prefix}{int(number) + 1}"
         return f"{value}_v2"
 
-    def save_edit(self, *, prompt_id: int, cultivo: str, variedad: str, version: str, descripcion: str, texto_prompt: str) -> None:
+    def save_edit(
+        self,
+        *,
+        prompt_id: int,
+        task: str,
+        cultivo: str,
+        variedad: str,
+        version: str,
+        descripcion: str,
+        texto_prompt: str,
+    ) -> None:
         self.repository.update_prompt(
             prompt_id=prompt_id,
+            task=task,
             cultivo=cultivo,
             variedad=variedad,
             prompt_version=version,
@@ -458,10 +538,19 @@ class PromptManagerService:
         )
 
     def save_new_version(
-        self, *, cultivo: str, variedad: str, version: str, descripcion: str, texto_prompt: str, activo: int = 1, es_default: int = 0
+        self,
+        *,
+        task: str,
+        cultivo: str,
+        variedad: str,
+        version: str,
+        descripcion: str,
+        texto_prompt: str,
+        activo: int = 1,
+        es_default: int = 0,
     ) -> None:
         self.repository.insert_prompt(
-            task=self.task,
+            task=task,
             cultivo=cultivo,
             variedad=variedad,
             prompt_version=version,
@@ -2581,30 +2670,35 @@ class PromptEditorWindow(tk.Toplevel):
 
         for col in range(2):
             self.columnconfigure(col, weight=(1 if col == 1 else 0))
-        self.rowconfigure(5, weight=1)
+        self.rowconfigure(6, weight=1)
 
+        self.task_var = tk.StringVar(
+            value=str(self.payload.get("task", "") or self.service.task or "estimacion_calibres")
+        )
         self.cultivo_var = tk.StringVar(value=str(self.payload.get("cultivo", "*") or "*"))
         self.variedad_var = tk.StringVar(value=str(self.payload.get("variedad", "*") or "*"))
         default_version = str(self.payload.get("prompt_version", "") or "").strip() or "v1_nuevo_prompt"
         self.version_var = tk.StringVar(value=default_version)
         self.descripcion_var = tk.StringVar(value=str(self.payload.get("descripcion", "") or ""))
 
-        ttk.Label(self, text="Cultivo:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
-        ttk.Entry(self, textvariable=self.cultivo_var).grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(12, 4))
-        ttk.Label(self, text="Variedad:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
-        ttk.Entry(self, textvariable=self.variedad_var).grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=4)
-        ttk.Label(self, text="Versión:").grid(row=2, column=0, sticky="w", padx=12, pady=4)
-        ttk.Entry(self, textvariable=self.version_var).grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=4)
-        ttk.Label(self, text="Descripción:").grid(row=3, column=0, sticky="w", padx=12, pady=4)
-        ttk.Entry(self, textvariable=self.descripcion_var).grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=4)
-        ttk.Label(self, text="prompt_text:").grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(6, 2))
+        ttk.Label(self, text="Task:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+        ttk.Entry(self, textvariable=self.task_var).grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(12, 4))
+        ttk.Label(self, text="Cultivo:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
+        ttk.Entry(self, textvariable=self.cultivo_var).grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=4)
+        ttk.Label(self, text="Variedad:").grid(row=2, column=0, sticky="w", padx=12, pady=4)
+        ttk.Entry(self, textvariable=self.variedad_var).grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=4)
+        ttk.Label(self, text="Versión:").grid(row=3, column=0, sticky="w", padx=12, pady=4)
+        ttk.Entry(self, textvariable=self.version_var).grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=4)
+        ttk.Label(self, text="Descripción:").grid(row=4, column=0, sticky="w", padx=12, pady=4)
+        ttk.Entry(self, textvariable=self.descripcion_var).grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=4)
+        ttk.Label(self, text="prompt_text:").grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(6, 2))
 
         self.txt_prompt = tk.Text(self, wrap="word", height=22)
-        self.txt_prompt.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=12, pady=(0, 6))
+        self.txt_prompt.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=12, pady=(0, 6))
         self.txt_prompt.insert("1.0", str(self.payload.get("texto_prompt", "") or ""))
 
         footer = ttk.Frame(self)
-        footer.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 12))
+        footer.grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 12))
         footer.columnconfigure(0, weight=1)
 
         self.btn_guardar_cambios = ttk.Button(footer, text="Guardar cambios", command=self._guardar_cambios)
@@ -2619,6 +2713,7 @@ class PromptEditorWindow(tk.Toplevel):
 
     def _payload_values(self) -> dict[str, str]:
         return {
+            "task": self.task_var.get().strip(),
             "cultivo": self.cultivo_var.get().strip(),
             "variedad": self.variedad_var.get().strip(),
             "version": self.version_var.get().strip(),
@@ -2627,6 +2722,9 @@ class PromptEditorWindow(tk.Toplevel):
         }
 
     def _validar(self, values: dict[str, str]) -> bool:
+        if not values["task"]:
+            messagebox.showwarning("Editor de prompt", "El task es obligatorio.", parent=self)
+            return False
         if not values["cultivo"]:
             messagebox.showwarning("Editor de prompt", "El cultivo es obligatorio.", parent=self)
             return False
@@ -2648,6 +2746,7 @@ class PromptEditorWindow(tk.Toplevel):
         try:
             self.service.save_edit(
                 prompt_id=int(self.payload["id"]),
+                task=values["task"],
                 cultivo=values["cultivo"],
                 variedad=values["variedad"],
                 version=values["version"],
@@ -2670,6 +2769,7 @@ class PromptEditorWindow(tk.Toplevel):
             return
         try:
             self.service.save_new_version(
+                task=values["task"],
                 cultivo=values["cultivo"],
                 variedad=values["variedad"],
                 version=values["version"],
@@ -2705,20 +2805,27 @@ class PromptManagementWindow(tk.Toplevel):
 
         toolbar = ttk.Frame(self, padding=10)
         toolbar.grid(row=0, column=0, sticky="ew")
-        ttk.Button(toolbar, text="Editar", command=self._editar).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(toolbar, text="Nuevo", command=self._nuevo).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(toolbar, text="Duplicar", command=self._duplicar).grid(row=0, column=2, padx=(0, 6))
-        ttk.Button(toolbar, text="Eliminar", command=self._eliminar).grid(row=0, column=3, padx=(0, 6))
-        ttk.Button(toolbar, text="Activar/Desactivar", command=self._toggle_activo).grid(row=0, column=4, padx=(0, 6))
+        ttk.Label(toolbar, text="Task:").grid(row=0, column=0, padx=(0, 6))
+        task_values = ["TODOS"] + self.service.list_tasks()
+        self.task_filter_var = tk.StringVar(value="TODOS")
+        self.task_filter_combo = ttk.Combobox(toolbar, textvariable=self.task_filter_var, values=task_values, state="readonly", width=32)
+        self.task_filter_combo.grid(row=0, column=1, padx=(0, 12))
+        self.task_filter_combo.bind("<<ComboboxSelected>>", self._on_task_filter_changed)
+        ttk.Button(toolbar, text="Editar", command=self._editar).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(toolbar, text="Nuevo", command=self._nuevo).grid(row=0, column=3, padx=(0, 6))
+        ttk.Button(toolbar, text="Duplicar", command=self._duplicar).grid(row=0, column=4, padx=(0, 6))
+        ttk.Button(toolbar, text="Eliminar", command=self._eliminar).grid(row=0, column=5, padx=(0, 6))
+        ttk.Button(toolbar, text="Activar/Desactivar", command=self._toggle_activo).grid(row=0, column=6, padx=(0, 6))
 
         frame = ttk.Frame(self, padding=(10, 0, 10, 10))
         frame.grid(row=1, column=0, sticky="nsew")
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        cols = ("cultivo", "variedad", "prompt_version", "activo", "es_default", "fecha_modificacion", "descripcion")
+        cols = ("task", "cultivo", "variedad", "prompt_version", "activo", "es_default", "fecha_modificacion", "descripcion")
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
         widths = {
+            "task": 180,
             "cultivo": 120,
             "variedad": 140,
             "prompt_version": 160,
@@ -2739,7 +2846,19 @@ class PromptManagementWindow(tk.Toplevel):
         self._rows_by_iid: dict[str, dict[str, Any]] = {}
         self._refresh()
 
+    def _on_task_filter_changed(self, _event: Any | None = None) -> None:
+        task_filter = self.task_filter_var.get().strip()
+        self.service.task = None if task_filter == "TODOS" else task_filter
+        self._refresh()
+
     def _refresh(self) -> None:
+        if hasattr(self, "task_filter_combo"):
+            current = self.task_filter_var.get().strip() or "TODOS"
+            task_values = ["TODOS"] + self.service.list_tasks()
+            self.task_filter_combo.configure(values=task_values)
+            if current not in task_values:
+                self.task_filter_var.set("TODOS")
+                self.service.task = None
         for iid in self.tree.get_children(""):
             self.tree.delete(iid)
         self._rows_by_iid.clear()
@@ -2748,6 +2867,7 @@ class PromptManagementWindow(tk.Toplevel):
                 "",
                 "end",
                 values=(
+                    row.get("task", ""),
                     row.get("cultivo", ""),
                     row.get("variedad", ""),
                     row.get("prompt_version", ""),
@@ -2782,7 +2902,10 @@ class PromptManagementWindow(tk.Toplevel):
         self._open_editor(current, allow_edit=True)
 
     def _nuevo(self) -> None:
-        self._open_editor({"activo": 1, "es_default": 0}, allow_edit=False)
+        payload = {"activo": 1, "es_default": 0}
+        if self.service.task:
+            payload["task"] = self.service.task
+        self._open_editor(payload, allow_edit=False)
 
     def _duplicar(self) -> None:
         row = self._selected_row()
@@ -2839,7 +2962,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         self.data_service = CalibresDataService(db_firestore)
         self.history_repo = CalibresIAHistoryRepository()
         self.prompt_repo = PromptSQLiteRepository(self.history_repo.db_path)
-        self.prompt_service = PromptManagerService(self.prompt_repo, task="estimacion_calibres")
+        self.prompt_service = PromptManagerService(self.prompt_repo, task=None)
 
         self.boleta_var = tk.StringVar()
         self.estado_var = tk.StringVar(value="Ingrese una boleta para comenzar.")
@@ -4448,7 +4571,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             messagebox.showinfo("Crear prompt para variedad", self.crear_prompt_estado_var.get(), parent=self)
             return
 
-        task = "estimacion_calibres"
+        task = str(self._ultimo_prompt_contexto.get("task", "") or "").strip() or "estimacion_calibres"
         cultivo = str(self._ultimo_prompt_contexto.get("cultivo", "*") or "*").strip().upper()
         variedad = str(self._ultimo_prompt_contexto.get("variedad", "*") or "*").strip().upper()
         prompt_actual = str(self._ultimo_prompt_contexto.get("prompt_version", "-") or "-").strip()
@@ -4495,7 +4618,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         combo = ttk.Combobox(modal, textvariable=base_var, values=labels, state="readonly")
         combo.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=(8, 2))
 
-        version_var = tk.StringVar(value=suggest_prompt_version(cultivo, variedad))
+        version_var = tk.StringVar(value=suggest_prompt_version_for_task(task, cultivo, variedad))
         nombre_var = tk.StringVar(value=f"Prompt {cultivo} {variedad}")
         descripcion_var = tk.StringVar(value=f"Copia inicial para ajuste de {variedad}.")
 
@@ -5399,6 +5522,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         avisos_prompt: list[str] = []
         prompt_version_counts: dict[str, int] = {}
         prompt_source_values: list[str] = []
+        task_values: list[str] = []
         hubo_fallback_internal = False
         sin_prompt_especifico = False
         fotos_con_patron = 0
@@ -5453,6 +5577,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             variedad_ia = self._normalizar_campo_ia(raw_result.get("variedad", ""))
             prompt_version = str(raw_result.get("prompt_version", "") or "").strip() or "-"
             prompt_source = str(raw_result.get("prompt_source", "") or "").strip() or "no_informado"
+            task_values.append(str(row.get("task_enviada", "") or "").strip())
             prompt_version_counts[prompt_version] = prompt_version_counts.get(prompt_version, 0) + 1
             prompt_source_values.append(prompt_source)
             ultimo_prompt_ctx = (
@@ -5507,8 +5632,11 @@ class ObtencionCalibresWindow(BaseToolWindow):
         )
         self.ia_contexto_prompt_var.set(ultimo_prompt_ctx)
         parsed_ctx = self._parse_prompt_ctx(ultimo_prompt_ctx)
+        task_unico = next((task for task in task_values if task), "estimacion_calibres")
+        if len({task for task in task_values if task}) > 1:
+            task_unico = "estimacion_calibres"
         self._ultimo_prompt_contexto = {
-            "task": "estimacion_calibres",
+            "task": task_unico,
             "cultivo": parsed_ctx["cultivo"],
             "variedad": parsed_ctx["variedad"],
             "prompt_version": parsed_ctx["prompt_version"],
