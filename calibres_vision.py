@@ -110,6 +110,32 @@ class PhotoFruitAnalysisResult:
         }
 
 
+@dataclass
+class PhotoFruitMeasurement:
+    """Medición de diámetro por fruto usando escala física mm/px."""
+
+    id: str
+    center_x: float
+    center_y: float
+    diameter_px: float
+    diameter_mm: float
+    calibre_estimado: str
+    confianza_medicion: str
+    motivo: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "center_x": self.center_x,
+            "center_y": self.center_y,
+            "diameter_px": self.diameter_px,
+            "diameter_mm": self.diameter_mm,
+            "calibre_estimado": self.calibre_estimado,
+            "confianza_medicion": self.confianza_medicion,
+            "motivo": self.motivo,
+        }
+
+
 class CirclePatternDetector:
     """Detector clásico (sin deep learning) basado en OpenCV."""
 
@@ -960,3 +986,94 @@ class FruitCaliberAnalyzer:
         solid_score = max(min((solidity - 0.90) / 0.10, 1.0), 0.0)
         score = (circ_score * 0.4) + (aspect_score * 0.2) + (fill_score * 0.2) + (solid_score * 0.2)
         return round(float(score), 2)
+
+
+def medir_frutos_con_escala(
+    image_bytes: bytes,
+    mm_por_px: float,
+    rangos_calibres: list[dict[str, Any]],
+) -> list[PhotoFruitMeasurement]:
+    """Mide frutos completos/casi completos y estima calibre usando escala física."""
+    if cv2 is None or np is None or not image_bytes or mm_por_px <= 0:
+        return []
+
+    analyzer = FruitCaliberAnalyzer()
+    try:
+        image_array = np.frombuffer(image_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        if frame is None:
+            return []
+
+        frame_scaled, ratio = analyzer._resize_if_needed(frame)
+        contours = analyzer._detect_fruit_candidates(frame_scaled)
+        if not contours:
+            return []
+
+        image_h, image_w = frame_scaled.shape[:2]
+        image_area = float(image_h * image_w)
+        min_area = max(image_area * 0.00012, 180.0)
+        max_area = image_area * 0.22
+        min_diameter = max(min(image_h, image_w) * 0.018, 14.0)
+        max_diameter = min(image_h, image_w) * 0.42
+        measurements: list[PhotoFruitMeasurement] = []
+
+        for index, contour in enumerate(contours, start=1):
+            area = float(cv2.contourArea(contour))
+            perimeter = float(cv2.arcLength(contour, True))
+            x, y, w, h = cv2.boundingRect(contour)
+            touches_border = x <= 1 or y <= 1 or (x + w) >= (image_w - 1) or (y + h) >= (image_h - 1)
+
+            if area < min_area or area > max_area or touches_border or perimeter <= 0:
+                continue
+
+            circularity = float((4.0 * np.pi * area) / (perimeter * perimeter))
+            aspect_ratio = float(w / max(h, 1))
+            if circularity < 0.68 or not (0.72 <= aspect_ratio <= 1.35):
+                continue
+
+            hull = cv2.convexHull(contour)
+            hull_area = float(cv2.contourArea(hull)) if hull is not None else 0.0
+            solidity = area / hull_area if hull_area > 1 else 0.0
+            if solidity < 0.9:
+                continue
+
+            (cx, cy), radius = cv2.minEnclosingCircle(contour)
+            encl_diameter = float(radius * 2.0)
+            fill_ratio = area / max(np.pi * radius * radius, 1.0)
+            if fill_ratio < 0.62:
+                continue
+
+            eq_diameter = float(np.sqrt(4.0 * area / np.pi))
+            diameter_px_scaled = min(eq_diameter, encl_diameter * 0.98)
+            if diameter_px_scaled < min_diameter or diameter_px_scaled > max_diameter:
+                continue
+
+            diameter_px = diameter_px_scaled / ratio
+            diameter_mm = diameter_px * mm_por_px
+            calibre = analyzer._assign_caliber(diameter_mm, rangos_calibres)
+            quality = analyzer._quality_score(circularity, aspect_ratio, fill_ratio, solidity)
+
+            confianza = "baja"
+            motivo = "medición con oclusión/parcialidad probable"
+            if quality >= 0.78:
+                confianza = "alta"
+                motivo = "fruto completo/casi completo con geometría consistente"
+            elif quality >= 0.58:
+                confianza = "media"
+                motivo = "fruto usable con leve oclusión o deformación"
+
+            measurements.append(
+                PhotoFruitMeasurement(
+                    id=f"fruto_{index:03d}",
+                    center_x=round(float(cx / ratio), 2),
+                    center_y=round(float(cy / ratio), 2),
+                    diameter_px=round(float(diameter_px), 2),
+                    diameter_mm=round(float(diameter_mm), 2),
+                    calibre_estimado=calibre,
+                    confianza_medicion=confianza,
+                    motivo=motivo,
+                )
+            )
+        return measurements
+    except Exception:
+        return []

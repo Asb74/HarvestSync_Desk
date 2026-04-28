@@ -9,7 +9,7 @@ except Exception:  # pragma: no cover
     cv2 = None
     np = None
 
-from calibres_vision import CirclePatternDetector, FruitCaliberAnalyzer
+from calibres_vision import CirclePatternDetector, FruitCaliberAnalyzer, medir_frutos_con_escala
 
 
 @unittest.skipIf(cv2 is None or np is None, "OpenCV/numpy no disponibles en este entorno")
@@ -107,6 +107,23 @@ class TestCalibresVision(unittest.TestCase):
         # El caso previo tendía a detectar una sola masa. Ahora debe producir varios candidatos.
         self.assertGreaterEqual(len(result.fruits), 3)
         self.assertTrue(any(item.valid for item in result.fruits))
+
+    def test_medir_frutos_con_escala_devuelve_mm_y_calibre(self) -> None:
+        frame = np.zeros((720, 720, 3), dtype=np.uint8)
+        naranja = (0, 140, 255)
+        cv2.circle(frame, (220, 300), 80, naranja, thickness=-1)
+        cv2.circle(frame, (470, 320), 78, naranja, thickness=-1)
+        raw = self._encode_png(frame)
+
+        rangos = [
+            {"nombre_calibre": "CAL 0", "desde_mm": 85, "hasta_mm": 120},
+            {"nombre_calibre": "CAL 3", "desde_mm": 65, "hasta_mm": 84.99},
+            {"nombre_calibre": "CAL 9", "desde_mm": 0, "hasta_mm": 49.99},
+        ]
+        mediciones = medir_frutos_con_escala(raw, mm_por_px=0.6, rangos_calibres=rangos)
+        self.assertGreaterEqual(len(mediciones), 2)
+        self.assertTrue(all(item.diameter_mm > 70 for item in mediciones))
+        self.assertTrue(all(item.calibre_estimado in {"CAL 0", "CAL 3"} for item in mediciones))
 
 
 if __name__ == '__main__':
