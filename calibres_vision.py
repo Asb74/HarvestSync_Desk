@@ -1,6 +1,8 @@
 """Lógica de visión para detectar patrón circular y cálculo prudente de calibres."""
 from __future__ import annotations
 
+import logging
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +12,8 @@ try:
 except Exception:  # pragma: no cover - fallback explícito si OpenCV no está instalado
     cv2 = None
     np = None
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,6 +28,9 @@ class CircleDetectionResult:
     center_x_px: float | None = None
     center_y_px: float | None = None
     detection_confidence: str | None = None
+    detection_method: str | None = None
+    marker_contour: list[tuple[int, int]] | None = None
+    inner_ellipse: tuple[float, float, float, float, float] | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -35,6 +42,7 @@ class CircleDetectionResult:
             "centro_x_px": self.center_x_px,
             "centro_y_px": self.center_y_px,
             "confianza_deteccion": self.detection_confidence,
+            "metodo_deteccion": self.detection_method,
             "valida_para_siguiente_paso": self.valid_for_next_step,
             "escala_fisica_fiable": self.valid_for_next_step,
             "error": self.error,
@@ -48,6 +56,9 @@ class PatternCandidate:
     diameter_px: float
     score: float
     confidence: str
+    method: str
+    marker_contour: list[tuple[int, int]] | None = None
+    inner_ellipse: tuple[float, float, float, float, float] | None = None
 
 
 @dataclass
@@ -106,9 +117,9 @@ class CirclePatternDetector:
         self.diametro_real_mm = float(diametro_real_mm)
         self.max_detection_size = max(int(max_detection_size), 400)
         self.min_pattern_diameter_ratio = 0.02
-        self.max_pattern_diameter_ratio = 0.65
-        self.min_pattern_diameter_px = 150.0
-        self.max_pattern_diameter_px = 400.0
+        self.max_pattern_diameter_ratio = 0.35
+        self.min_pattern_diameter_px = 40.0
+        self.max_pattern_diameter_px = 900.0
         self.absurd_min_pattern_diameter_px = 40.0
         self.min_mm_per_px = 0.05
         self.max_mm_per_px = 1.5
@@ -165,8 +176,19 @@ class CirclePatternDetector:
                 )
 
             mm_per_pixel = self.diametro_real_mm / diameter_px
-            escala_fiable = mm_per_pixel > 0
-            error = None if (self.min_mm_per_px <= mm_per_pixel <= self.max_mm_per_px) else "escala_fuera_rango_tolerada"
+            escala_fiable = bool(self.min_mm_per_px <= mm_per_pixel <= self.max_mm_per_px)
+            error = "ok" if escala_fiable else "escala_fuera_rango"
+            if not escala_fiable and candidate.confidence != "baja":
+                candidate.confidence = "baja"
+            LOGGER.info(
+                "Detección patrón: foto=%s diametro_px=%.2f mm_por_px=%.5f confianza=%s metodo=%s valida=%s",
+                image_id,
+                diameter_px,
+                mm_per_pixel,
+                candidate.confidence,
+                candidate.method,
+                escala_fiable,
+            )
             return CircleDetectionResult(
                 image_id=image_id,
                 detected=True,
@@ -176,6 +198,9 @@ class CirclePatternDetector:
                 center_x_px=round(float(candidate.center_x), 2),
                 center_y_px=round(float(candidate.center_y), 2),
                 detection_confidence=candidate.confidence,
+                detection_method=candidate.method,
+                marker_contour=candidate.marker_contour,
+                inner_ellipse=candidate.inner_ellipse,
                 error=error,
             )
         except Exception as exc:  # noqa: BLE001
@@ -201,6 +226,21 @@ class CirclePatternDetector:
 
             overlay = frame.copy()
             color = (0, 170, 0) if result.detected else (0, 0, 220)
+            if result.marker_contour:
+                cnt = np.array(result.marker_contour, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(overlay, [cnt], True, (255, 80, 80), 3)
+            if result.inner_ellipse:
+                ex, ey, ew, eh, angle = result.inner_ellipse
+                cv2.ellipse(
+                    overlay,
+                    (int(round(ex)), int(round(ey))),
+                    (max(int(round(ew / 2.0)), 1), max(int(round(eh / 2.0)), 1)),
+                    float(angle),
+                    0,
+                    360,
+                    (0, 255, 255),
+                    2,
+                )
             if result.detected and result.center_x_px is not None and result.center_y_px is not None and result.diameter_px:
                 cx = int(round(result.center_x_px))
                 cy = int(round(result.center_y_px))
@@ -212,6 +252,7 @@ class CirclePatternDetector:
                 f"Foto: {result.image_id}",
                 f"Patrón detectado: {'SI' if result.detected else 'NO'}",
                 f"Confianza: {result.detection_confidence or '-'}",
+                f"Método: {result.detection_method or '-'}",
                 f"Diametro px: {result.diameter_px if result.diameter_px is not None else '-'}",
                 f"mm/px: {result.mm_per_pixel if result.mm_per_pixel is not None else '-'}",
                 f"Valida: {'SI' if result.valid_for_next_step else 'NO'}",
@@ -253,104 +294,62 @@ class CirclePatternDetector:
                 diameter_px=float(candidate_small.diameter_px * inv),
                 score=float(candidate_small.score),
                 confidence=candidate_small.confidence,
+                method=candidate_small.method,
+                marker_contour=[
+                    (int(round(point[0] * inv)), int(round(point[1] * inv)))
+                    for point in (candidate_small.marker_contour or [])
+                ]
+                or None,
+                inner_ellipse=(
+                    float(candidate_small.inner_ellipse[0] * inv),
+                    float(candidate_small.inner_ellipse[1] * inv),
+                    float(candidate_small.inner_ellipse[2] * inv),
+                    float(candidate_small.inner_ellipse[3] * inv),
+                    float(candidate_small.inner_ellipse[4]),
+                )
+                if candidate_small.inner_ellipse
+                else None,
             ), None
         return candidate_small, None
 
     def _estimate_circle_on_frame(self, frame: Any) -> tuple[PatternCandidate | None, str | None]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (9, 9), 1.8)
-        short_side = float(min(gray.shape[:2]))
-        hough_reason_counts: dict[str, int] = {}
+        gray, white_mask = self._prepare_marker_masks(frame)
+        marker_candidates = self._find_marker_candidates(frame, white_mask)
+        LOGGER.info("Detección patrón: candidatos marcador encontrados=%s", len(marker_candidates))
 
-        circles = cv2.HoughCircles(
-            gray,
-            cv2.HOUGH_GRADIENT,
-            dp=1.2,
-            minDist=max(gray.shape[0], gray.shape[1]) * 0.25,
-            param1=120,
-            param2=30,
-            minRadius=max(int(min(gray.shape[:2]) * 0.05), 8),
-            maxRadius=max(int(min(gray.shape[:2]) * 0.48), 20),
-        )
-
+        reason_counts: dict[str, int] = {}
         best_candidate: PatternCandidate | None = None
         best_score = float("-inf")
-        if circles is not None and len(circles) > 0:
-            candidates = circles[0]
-            for candidate in candidates:
-                cx, cy, radius = float(candidate[0]), float(candidate[1]), float(candidate[2])
-                score, reason, confidence = self._score_pattern_candidate(frame, cx, cy, radius * 2.0, circularity=1.0)
-                if reason is not None:
-                    hough_reason_counts[reason] = hough_reason_counts.get(reason, 0) + 1
-                    continue
-                if score > best_score:
-                    best_score = score
-                    best_candidate = PatternCandidate(
-                        center_x=cx,
-                        center_y=cy,
-                        diameter_px=radius * 2.0,
-                        score=score,
-                        confidence=confidence,
-                    )
-            if best_candidate is not None:
-                return best_candidate, None
-
-        edges = cv2.Canny(gray, 60, 160)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contour_reason_counts: dict[str, int] = {}
-
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < 250:
-                continue
-            perimeter = cv2.arcLength(contour, True)
-            if perimeter <= 0:
-                continue
-            circularity = (4.0 * np.pi * area) / (perimeter * perimeter)
-            if circularity < 0.58:
-                continue
-            center_x: float
-            center_y: float
-            diameter_px: float
-            axis_ratio = 1.0
-            if len(contour) >= 5:
-                (center, axes, _) = cv2.fitEllipse(contour)
-                center_x, center_y = float(center[0]), float(center[1])
-                major = float(max(axes[0], axes[1]))
-                minor = float(min(axes[0], axes[1]))
-                if major <= 0 or minor <= 0:
-                    continue
-                diameter_px = (major + minor) / 2.0
-                axis_ratio = minor / major
-            else:
-                (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
-                diameter_px = float(radius * 2.0)
-            score, reason, confidence = self._score_pattern_candidate(
-                frame,
-                float(center_x),
-                float(center_y),
-                diameter_px,
-                circularity=float(circularity),
-                axis_ratio=float(axis_ratio),
-            )
+        for marker in marker_candidates:
+            marker_candidate, reason = self._analyze_marker_interior(frame, gray, marker)
             if reason is not None:
-                contour_reason_counts[reason] = contour_reason_counts.get(reason, 0) + 1
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 continue
-            score += min(float(area / max(short_side * short_side, 1.0)), 1.0)
-            if score > best_score:
-                best_score = score
-                best_candidate = PatternCandidate(
-                    center_x=float(center_x),
-                    center_y=float(center_y),
-                    diameter_px=float(diameter_px),
-                    score=score,
-                    confidence=confidence,
-                )
+            if marker_candidate and marker_candidate.score > best_score:
+                best_score = marker_candidate.score
+                best_candidate = marker_candidate
 
         if best_candidate is not None:
+            LOGGER.info(
+                "Detección patrón: mejor candidato método=%s diametro_px=%.2f confianza=%s",
+                best_candidate.method,
+                best_candidate.diameter_px,
+                best_candidate.confidence,
+            )
             return best_candidate, None
 
-        reason = self._select_failure_reason(hough_reason_counts, contour_reason_counts, circles, contours)
+        hough_candidate, hough_reason = self._detect_hough_global(frame, gray)
+        if hough_candidate is not None:
+            LOGGER.info(
+                "Detección patrón: fallback global método=%s diametro_px=%.2f confianza=%s",
+                hough_candidate.method,
+                hough_candidate.diameter_px,
+                hough_candidate.confidence,
+            )
+            return hough_candidate, None
+        if hough_reason:
+            reason_counts[hough_reason] = reason_counts.get(hough_reason, 0) + 1
+        reason = self._select_failure_reason(reason_counts)
         return None, reason
 
     def _score_pattern_candidate(
@@ -389,11 +388,13 @@ class CirclePatternDetector:
         center_penalty = center_bias_x + center_bias_y
         wide_range_penalty = 0.0
         if diameter_px < self.min_pattern_diameter_px:
-            wide_range_penalty += min((self.min_pattern_diameter_px - diameter_px) / self.min_pattern_diameter_px, 1.2)
+            wide_range_penalty += min((self.min_pattern_diameter_px - diameter_px) / self.min_pattern_diameter_px, 1.0)
         elif diameter_px > self.max_pattern_diameter_px:
-            wide_range_penalty += min((diameter_px - self.max_pattern_diameter_px) / self.max_pattern_diameter_px, 1.2)
-        if ratio < self.min_pattern_diameter_ratio or ratio > self.max_pattern_diameter_ratio:
-            wide_range_penalty += 0.35
+            wide_range_penalty += min((diameter_px - self.max_pattern_diameter_px) / self.max_pattern_diameter_px, 1.0)
+        if ratio < self.min_pattern_diameter_ratio:
+            wide_range_penalty += min((self.min_pattern_diameter_ratio - ratio) * 4.5, 1.0)
+        elif ratio > self.max_pattern_diameter_ratio:
+            wide_range_penalty += min((ratio - self.max_pattern_diameter_ratio) * 4.5, 1.0)
 
         contrast_score = self._contrast_score(frame, cx, cy, diameter_px / 2.0)
         circularity_score = max(0.0, min(circularity, 1.2))
@@ -413,6 +414,178 @@ class CirclePatternDetector:
             confidence = "baja"
         return score, None, confidence
 
+    def _prepare_marker_masks(self, frame: Any) -> tuple[Any, Any]:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (7, 7), 1.4)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        white_hsv = cv2.inRange(hsv, (0, 0, 145), (180, 90, 255))
+        white_adapt = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            -6,
+        )
+        white_mask = cv2.bitwise_or(white_hsv, white_adapt)
+        kernel = np.ones((5, 5), np.uint8)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        return gray, white_mask
+
+    def _find_marker_candidates(self, frame: Any, white_mask: Any) -> list[dict[str, Any]]:
+        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        height, width = frame.shape[:2]
+        area_img = float(height * width)
+        candidates: list[dict[str, Any]] = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < area_img * 0.001 or area > area_img * 0.55:
+                LOGGER.debug("Marcador descartado por área: %.2f", area)
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            if w <= 0 or h <= 0:
+                continue
+            ratio = float(max(w, h) / max(min(w, h), 1))
+            if ratio > 5.2:
+                LOGGER.debug("Marcador descartado por proporción: %.2f", ratio)
+                continue
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.04 * peri, True) if peri > 0 else contour
+            whiteness = float(np.mean(white_mask[y : y + h, x : x + w])) / 255.0
+            candidates.append(
+                {
+                    "contour": contour,
+                    "bbox": (x, y, w, h),
+                    "approx_points": len(approx),
+                    "whiteness": whiteness,
+                    "area": area,
+                }
+            )
+        candidates.sort(key=lambda item: (item["whiteness"], item["area"]), reverse=True)
+        return candidates[:12]
+
+    def _analyze_marker_interior(self, frame: Any, gray: Any, marker: dict[str, Any]) -> tuple[PatternCandidate | None, str | None]:
+        x, y, w, h = marker["bbox"]
+        pad = int(max(4, round(min(w, h) * 0.08)))
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(frame.shape[1], x + w + pad), min(frame.shape[0], y + h + pad)
+        roi_gray = gray[y0:y1, x0:x1]
+        if roi_gray.size == 0:
+            return None, "roi_marcador_vacia"
+
+        roi_eq = cv2.equalizeHist(roi_gray)
+        roi_blur = cv2.GaussianBlur(roi_eq, (7, 7), 1.3)
+        inner_bin = cv2.adaptiveThreshold(roi_blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 29, 8)
+        contours, _ = cv2.findContours(inner_bin, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        best_local: PatternCandidate | None = None
+        best_score = float("-inf")
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < max(40.0, (w * h) * 0.006):
+                continue
+            if len(contour) < 5:
+                continue
+            (center, axes, angle) = cv2.fitEllipse(contour)
+            major = float(max(axes[0], axes[1]))
+            minor = float(min(axes[0], axes[1]))
+            if minor <= 0 or major <= 0:
+                continue
+            axis_ratio = minor / major
+            if axis_ratio < 0.48:
+                continue
+            cx = float(center[0] + x0)
+            cy = float(center[1] + y0)
+            diameter_px = (major + minor) / 2.0
+            circ = (4.0 * math.pi * area) / max(cv2.arcLength(contour, True) ** 2, 1.0)
+            score, _, confidence = self._score_pattern_candidate(frame, cx, cy, diameter_px, circularity=circ, axis_ratio=axis_ratio)
+            score += marker["whiteness"] * 2.5
+            if score > best_score:
+                best_score = score
+                best_local = PatternCandidate(
+                    center_x=cx,
+                    center_y=cy,
+                    diameter_px=float(diameter_px),
+                    score=float(score),
+                    confidence=confidence,
+                    method="marcador_rectangular_elipse",
+                    marker_contour=[(int(pt[0][0]), int(pt[0][1])) for pt in marker["contour"]],
+                    inner_ellipse=(cx, cy, major, minor, float(angle)),
+                )
+        if best_local is not None:
+            return best_local, None
+
+        hough_in_roi = self._detect_hough_in_roi(frame, roi_blur, x0, y0, marker)
+        if hough_in_roi is not None:
+            return hough_in_roi, None
+        return None, "sin_elipse_o_circulo_en_marcador"
+
+    def _detect_hough_in_roi(self, frame: Any, roi_blur: Any, x0: int, y0: int, marker: dict[str, Any]) -> PatternCandidate | None:
+        circles = cv2.HoughCircles(
+            roi_blur,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=max(roi_blur.shape[0], roi_blur.shape[1]) * 0.2,
+            param1=110,
+            param2=24,
+            minRadius=max(int(min(roi_blur.shape[:2]) * 0.08), 6),
+            maxRadius=max(int(min(roi_blur.shape[:2]) * 0.46), 12),
+        )
+        if circles is None or len(circles) == 0:
+            return None
+        best: PatternCandidate | None = None
+        best_score = float("-inf")
+        for c in circles[0]:
+            cx = float(c[0] + x0)
+            cy = float(c[1] + y0)
+            diameter_px = float(c[2] * 2.0)
+            score, _, confidence = self._score_pattern_candidate(frame, cx, cy, diameter_px, circularity=1.0, axis_ratio=1.0)
+            score += marker["whiteness"] * 1.8
+            if score > best_score:
+                best_score = score
+                best = PatternCandidate(
+                    center_x=cx,
+                    center_y=cy,
+                    diameter_px=diameter_px,
+                    score=score,
+                    confidence=confidence,
+                    method="hough_circle",
+                    marker_contour=[(int(pt[0][0]), int(pt[0][1])) for pt in marker["contour"]],
+                )
+        return best
+
+    def _detect_hough_global(self, frame: Any, gray: Any) -> tuple[PatternCandidate | None, str | None]:
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=1.25,
+            minDist=max(gray.shape[0], gray.shape[1]) * 0.28,
+            param1=120,
+            param2=32,
+            minRadius=max(int(min(gray.shape[:2]) * 0.03), 8),
+            maxRadius=max(int(min(gray.shape[:2]) * 0.38), 15),
+        )
+        if circles is None or len(circles) == 0:
+            return None, "sin_candidatos_hough"
+        best: PatternCandidate | None = None
+        best_score = float("-inf")
+        for candidate in circles[0]:
+            cx, cy, radius = float(candidate[0]), float(candidate[1]), float(candidate[2])
+            score, _, confidence = self._score_pattern_candidate(frame, cx, cy, radius * 2.0, circularity=1.0, axis_ratio=1.0)
+            score -= 0.25
+            if score > best_score:
+                best_score = score
+                best = PatternCandidate(
+                    center_x=cx,
+                    center_y=cy,
+                    diameter_px=radius * 2.0,
+                    score=score,
+                    confidence=confidence,
+                    method="fallback",
+                )
+        return best, None if best is not None else "hough_global_descartado"
+
     def _contrast_score(self, frame: Any, cx: float, cy: float, radius: float) -> float:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape[:2]
@@ -431,24 +604,11 @@ class CirclePatternDetector:
         bg_contrast = abs(ring_mean - outer_mean) / 255.0
         return max(0.0, min((edge_contrast * 0.65) + (bg_contrast * 0.35), 1.0))
 
-    def _select_failure_reason(
-        self,
-        hough_reasons: dict[str, int],
-        contour_reasons: dict[str, int],
-        circles: Any,
-        contours: list[Any],
-    ) -> str:
-        combined: dict[str, int] = {}
-        for key, value in hough_reasons.items():
-            combined[key] = combined.get(key, 0) + value
-        for key, value in contour_reasons.items():
-            combined[key] = combined.get(key, 0) + value
-        if combined:
-            return max(combined.items(), key=lambda item: item[1])[0]
-        if circles is None or len(circles) == 0:
-            if not contours:
-                return "sin_candidatos_hough"
-            return "no_se_detecto_patron_confiable"
+    def _select_failure_reason(self, reason_counts: dict[str, int]) -> str:
+        if reason_counts:
+            top_reason = max(reason_counts.items(), key=lambda item: item[1])[0]
+            LOGGER.info("Detección patrón: candidatos descartados=%s", reason_counts)
+            return top_reason
         return "no_se_detecto_patron_confiable"
 
 

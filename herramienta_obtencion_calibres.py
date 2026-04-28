@@ -5069,6 +5069,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "diametro_patron_px": escala_info["diametro_patron_px"],
             "mm_por_px": escala_info["mm_por_px"],
             "confianza_deteccion": escala_info.get("confianza_deteccion"),
+            "confianza_deteccion_patron": escala_info.get("confianza_deteccion"),
+            "metodo_deteccion_patron": escala_info.get("metodo_deteccion_patron"),
             "estado_patron": escala_info["estado_deteccion_patron"],
             "warning_sin_escala": not bool(escala_info["escala_fisica_fiable"]),
         }
@@ -5082,6 +5084,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "diametro_patron_px": None,
             "mm_por_px": None,
             "confianza_deteccion": None,
+            "metodo_deteccion_patron": None,
             "estado_deteccion_patron": "deteccion_no_ejecutada",
             "escala_fisica_fiable": False,
         }
@@ -5134,6 +5137,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "diametro_patron_px": float(result.diameter_px) if result.diameter_px is not None else None,
             "mm_por_px": float(result.mm_per_pixel) if result.mm_per_pixel is not None else None,
             "confianza_deteccion": result.detection_confidence,
+            "confianza_deteccion_patron": result.detection_confidence,
+            "metodo_deteccion_patron": result.detection_method,
             "estado_deteccion_patron": estado,
             "escala_fisica_fiable": escala_fiable,
         }
