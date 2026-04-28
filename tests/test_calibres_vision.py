@@ -29,6 +29,7 @@ class TestCalibresVision(unittest.TestCase):
 
         self.assertTrue(result.detected)
         self.assertTrue(result.valid_for_next_step)
+        self.assertIn(result.detection_confidence, {"alta", "media", "baja"})
         self.assertIsNotNone(result.diameter_px)
         self.assertIsNotNone(result.mm_per_pixel)
         self.assertGreater(result.mm_per_pixel, 0.2)
@@ -45,6 +46,19 @@ class TestCalibresVision(unittest.TestCase):
         self.assertFalse(result.detected)
         self.assertFalse(result.valid_for_next_step)
         self.assertIsNone(result.mm_per_pixel)
+
+    def test_detecta_elipse_y_reporta_confianza(self) -> None:
+        frame = np.zeros((640, 640, 3), dtype=np.uint8)
+        cv2.ellipse(frame, (320, 320), (160, 120), 22, 0, 360, (255, 255, 255), thickness=10)
+        raw = self._encode_png(frame)
+
+        detector = CirclePatternDetector(diametro_real_mm=94.0)
+        result = detector.detect_from_bytes("foto_elipse_1", raw)
+
+        self.assertTrue(result.detected)
+        self.assertTrue(result.valid_for_next_step)
+        self.assertIsNotNone(result.diameter_px)
+        self.assertIn(result.detection_confidence, {"alta", "media", "baja"})
 
     def test_analisis_frutos_descarta_parcial_y_clasifica_validos(self) -> None:
         frame = np.zeros((700, 700, 3), dtype=np.uint8)

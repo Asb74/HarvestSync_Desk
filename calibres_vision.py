@@ -23,6 +23,7 @@ class CircleDetectionResult:
     valid_for_next_step: bool
     center_x_px: float | None = None
     center_y_px: float | None = None
+    detection_confidence: str | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -33,9 +34,20 @@ class CircleDetectionResult:
             "mm_por_pixel": self.mm_per_pixel,
             "centro_x_px": self.center_x_px,
             "centro_y_px": self.center_y_px,
+            "confianza_deteccion": self.detection_confidence,
             "valida_para_siguiente_paso": self.valid_for_next_step,
+            "escala_fisica_fiable": self.valid_for_next_step,
             "error": self.error,
         }
+
+
+@dataclass
+class PatternCandidate:
+    center_x: float
+    center_y: float
+    diameter_px: float
+    score: float
+    confidence: str
 
 
 @dataclass
@@ -93,8 +105,11 @@ class CirclePatternDetector:
     def __init__(self, diametro_real_mm: float, max_detection_size: int = 1200) -> None:
         self.diametro_real_mm = float(diametro_real_mm)
         self.max_detection_size = max(int(max_detection_size), 400)
-        self.min_pattern_diameter_ratio = 0.03
-        self.max_pattern_diameter_ratio = 0.22
+        self.min_pattern_diameter_ratio = 0.02
+        self.max_pattern_diameter_ratio = 0.65
+        self.min_pattern_diameter_px = 150.0
+        self.max_pattern_diameter_px = 400.0
+        self.absurd_min_pattern_diameter_px = 40.0
         self.min_mm_per_px = 0.05
         self.max_mm_per_px = 1.5
         self.max_border_margin_ratio = 0.04
@@ -126,8 +141,8 @@ class CirclePatternDetector:
             if frame is None:
                 raise ValueError("No se pudo decodificar la imagen")
 
-            circle, reason = self._estimate_circle(frame)
-            if circle is None:
+            candidate, reason = self._estimate_circle(frame)
+            if candidate is None:
                 return CircleDetectionResult(
                     image_id=image_id,
                     detected=False,
@@ -137,36 +152,31 @@ class CirclePatternDetector:
                     error=reason or "no_se_detecto_patron_confiable",
                 )
 
-            center_x, center_y, radius = circle
-            diameter_px = radius * 2.0
-            if diameter_px <= 0 or radius <= 0:
+            diameter_px = float(candidate.diameter_px)
+            if diameter_px <= 0:
                 return CircleDetectionResult(
                     image_id=image_id,
                     detected=False,
                     diameter_px=None,
                     mm_per_pixel=None,
                     valid_for_next_step=False,
-                    error="candidatos_descartados_por_tamano",
+                    detection_confidence="baja",
+                    error="diametro_invalido",
                 )
 
             mm_per_pixel = self.diametro_real_mm / diameter_px
-            if not (self.min_mm_per_px <= mm_per_pixel <= self.max_mm_per_px):
-                return CircleDetectionResult(
-                    image_id=image_id,
-                    detected=False,
-                    diameter_px=None,
-                    mm_per_pixel=None,
-                    valid_for_next_step=False,
-                    error="escala_fuera_rango",
-                )
+            escala_fiable = mm_per_pixel > 0
+            error = None if (self.min_mm_per_px <= mm_per_pixel <= self.max_mm_per_px) else "escala_fuera_rango_tolerada"
             return CircleDetectionResult(
                 image_id=image_id,
                 detected=True,
                 diameter_px=round(float(diameter_px), 2),
                 mm_per_pixel=round(float(mm_per_pixel), 5),
-                valid_for_next_step=True,
-                center_x_px=round(float(center_x), 2),
-                center_y_px=round(float(center_y), 2),
+                valid_for_next_step=escala_fiable,
+                center_x_px=round(float(candidate.center_x), 2),
+                center_y_px=round(float(candidate.center_y), 2),
+                detection_confidence=candidate.confidence,
+                error=error,
             )
         except Exception as exc:  # noqa: BLE001
             return CircleDetectionResult(
@@ -201,6 +211,7 @@ class CirclePatternDetector:
             lines = [
                 f"Foto: {result.image_id}",
                 f"Patrón detectado: {'SI' if result.detected else 'NO'}",
+                f"Confianza: {result.detection_confidence or '-'}",
                 f"Diametro px: {result.diameter_px if result.diameter_px is not None else '-'}",
                 f"mm/px: {result.mm_per_pixel if result.mm_per_pixel is not None else '-'}",
                 f"Valida: {'SI' if result.valid_for_next_step else 'NO'}",
@@ -221,8 +232,8 @@ class CirclePatternDetector:
         except Exception:
             return None
 
-    def _estimate_circle(self, frame: Any) -> tuple[tuple[float, float, float] | None, str | None]:
-        """Estima círculo en píxeles reales (cx, cy, r) usando imagen reducida para acelerar."""
+    def _estimate_circle(self, frame: Any) -> tuple[PatternCandidate | None, str | None]:
+        """Estima patrón circular/elíptico en píxeles reales usando imagen reducida para acelerar."""
         height, width = frame.shape[:2]
         longest = max(height, width)
         scale = 1.0
@@ -230,17 +241,22 @@ class CirclePatternDetector:
             scale = self.max_detection_size / float(longest)
             frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
-        circle_small, reason = self._estimate_circle_on_frame(frame)
-        if circle_small is None:
+        candidate_small, reason = self._estimate_circle_on_frame(frame)
+        if candidate_small is None:
             return None, reason or "no_se_detecto_patron_confiable"
 
-        cx, cy, radius = circle_small
         if scale != 1.0:
             inv = 1.0 / scale
-            return (float(cx * inv), float(cy * inv), float(radius * inv)), None
-        return (float(cx), float(cy), float(radius)), None
+            return PatternCandidate(
+                center_x=float(candidate_small.center_x * inv),
+                center_y=float(candidate_small.center_y * inv),
+                diameter_px=float(candidate_small.diameter_px * inv),
+                score=float(candidate_small.score),
+                confidence=candidate_small.confidence,
+            ), None
+        return candidate_small, None
 
-    def _estimate_circle_on_frame(self, frame: Any) -> tuple[tuple[float, float, float] | None, str | None]:
+    def _estimate_circle_on_frame(self, frame: Any) -> tuple[PatternCandidate | None, str | None]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (9, 9), 1.8)
         short_side = float(min(gray.shape[:2]))
@@ -257,21 +273,27 @@ class CirclePatternDetector:
             maxRadius=max(int(min(gray.shape[:2]) * 0.48), 20),
         )
 
-        best_circle: tuple[float, float, float] | None = None
+        best_candidate: PatternCandidate | None = None
         best_score = float("-inf")
         if circles is not None and len(circles) > 0:
             candidates = circles[0]
             for candidate in candidates:
                 cx, cy, radius = float(candidate[0]), float(candidate[1]), float(candidate[2])
-                score, reason = self._score_circle_candidate(frame, cx, cy, radius)
+                score, reason, confidence = self._score_pattern_candidate(frame, cx, cy, radius * 2.0, circularity=1.0)
                 if reason is not None:
                     hough_reason_counts[reason] = hough_reason_counts.get(reason, 0) + 1
                     continue
                 if score > best_score:
                     best_score = score
-                    best_circle = (cx, cy, radius)
-            if best_circle is not None:
-                return best_circle, None
+                    best_candidate = PatternCandidate(
+                        center_x=cx,
+                        center_y=cy,
+                        diameter_px=radius * 2.0,
+                        score=score,
+                        confidence=confidence,
+                    )
+            if best_candidate is not None:
+                return best_candidate, None
 
         edges = cv2.Canny(gray, 60, 160)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -285,56 +307,129 @@ class CirclePatternDetector:
             if perimeter <= 0:
                 continue
             circularity = (4.0 * np.pi * area) / (perimeter * perimeter)
-            if circularity < 0.75:
+            if circularity < 0.58:
                 continue
-            (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
-            score, reason = self._score_circle_candidate(frame, float(center_x), float(center_y), float(radius))
+            center_x: float
+            center_y: float
+            diameter_px: float
+            axis_ratio = 1.0
+            if len(contour) >= 5:
+                (center, axes, _) = cv2.fitEllipse(contour)
+                center_x, center_y = float(center[0]), float(center[1])
+                major = float(max(axes[0], axes[1]))
+                minor = float(min(axes[0], axes[1]))
+                if major <= 0 or minor <= 0:
+                    continue
+                diameter_px = (major + minor) / 2.0
+                axis_ratio = minor / major
+            else:
+                (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
+                diameter_px = float(radius * 2.0)
+            score, reason, confidence = self._score_pattern_candidate(
+                frame,
+                float(center_x),
+                float(center_y),
+                diameter_px,
+                circularity=float(circularity),
+                axis_ratio=float(axis_ratio),
+            )
             if reason is not None:
                 contour_reason_counts[reason] = contour_reason_counts.get(reason, 0) + 1
                 continue
-            score += float(circularity)
             score += min(float(area / max(short_side * short_side, 1.0)), 1.0)
             if score > best_score:
                 best_score = score
-                best_circle = (float(center_x), float(center_y), float(radius))
+                best_candidate = PatternCandidate(
+                    center_x=float(center_x),
+                    center_y=float(center_y),
+                    diameter_px=float(diameter_px),
+                    score=score,
+                    confidence=confidence,
+                )
 
-        if best_circle is not None:
-            return best_circle, None
+        if best_candidate is not None:
+            return best_candidate, None
 
         reason = self._select_failure_reason(hough_reason_counts, contour_reason_counts, circles, contours)
         return None, reason
 
-    def _score_circle_candidate(self, frame: Any, cx: float, cy: float, radius: float) -> tuple[float, str | None]:
+    def _score_pattern_candidate(
+        self,
+        frame: Any,
+        cx: float,
+        cy: float,
+        diameter_px: float,
+        circularity: float,
+        axis_ratio: float = 1.0,
+    ) -> tuple[float, str | None, str]:
         height, width = frame.shape[:2]
         short_side = float(min(width, height))
-        if radius <= 0:
-            return float("-inf"), "candidatos_descartados_por_tamano"
+        if diameter_px <= 0:
+            return float("-inf"), "diametro_invalido", "baja"
 
-        diameter_px = float(radius * 2.0)
+        if diameter_px < self.absurd_min_pattern_diameter_px or diameter_px > (short_side * 0.95):
+            return float("-inf"), "candidatos_descartados_por_tamano_absurdo", "baja"
         ratio = diameter_px / max(short_side, 1.0)
-        if ratio < self.min_pattern_diameter_ratio or ratio > self.max_pattern_diameter_ratio:
-            return float("-inf"), "candidatos_descartados_por_tamano"
+        cand_radius = diameter_px / 2.0
 
         margin = short_side * self.max_border_margin_ratio
         if (
-            (cx - radius) < margin
-            or (cy - radius) < margin
-            or (cx + radius) > (width - margin)
-            or (cy + radius) > (height - margin)
+            (cx - cand_radius) < margin
+            or (cy - cand_radius) < margin
+            or (cx + cand_radius) > (width - margin)
+            or (cy + cand_radius) > (height - margin)
         ):
-            return float("-inf"), "patron_cerca_borde"
+            return float("-inf"), "patron_cerca_borde", "baja"
 
         mm_per_pixel = self.diametro_real_mm / diameter_px
-        if not (self.min_mm_per_px <= mm_per_pixel <= self.max_mm_per_px):
-            return float("-inf"), "escala_fuera_rango"
+        scale_penalty = 0.0 if (self.min_mm_per_px <= mm_per_pixel <= self.max_mm_per_px) else 1.2
 
         center_bias_x = abs(cx - (width / 2.0)) / max(width / 2.0, 1.0)
         center_bias_y = abs(cy - (height / 2.0)) / max(height / 2.0, 1.0)
         center_penalty = center_bias_x + center_bias_y
-        target_ratio = (self.min_pattern_diameter_ratio + self.max_pattern_diameter_ratio) / 2.0
-        size_penalty = abs(ratio - target_ratio) / max(target_ratio, 0.001)
-        score = 10.0 - (4.0 * size_penalty) - (2.5 * center_penalty)
-        return score, None
+        wide_range_penalty = 0.0
+        if diameter_px < self.min_pattern_diameter_px:
+            wide_range_penalty += min((self.min_pattern_diameter_px - diameter_px) / self.min_pattern_diameter_px, 1.2)
+        elif diameter_px > self.max_pattern_diameter_px:
+            wide_range_penalty += min((diameter_px - self.max_pattern_diameter_px) / self.max_pattern_diameter_px, 1.2)
+        if ratio < self.min_pattern_diameter_ratio or ratio > self.max_pattern_diameter_ratio:
+            wide_range_penalty += 0.35
+
+        contrast_score = self._contrast_score(frame, cx, cy, diameter_px / 2.0)
+        circularity_score = max(0.0, min(circularity, 1.2))
+        axis_score = max(0.0, min(axis_ratio, 1.0))
+        score = (
+            (5.5 * circularity_score)
+            + (4.0 * contrast_score)
+            + (2.2 * axis_score)
+            - (2.4 * center_penalty)
+            - (2.6 * wide_range_penalty)
+            - (1.8 * scale_penalty)
+        )
+        confidence = "alta"
+        if wide_range_penalty >= 0.9 or scale_penalty > 0:
+            confidence = "media"
+        if wide_range_penalty >= 1.4 or contrast_score < 0.20 or circularity_score < 0.62:
+            confidence = "baja"
+        return score, None, confidence
+
+    def _contrast_score(self, frame: Any, cx: float, cy: float, radius: float) -> float:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape[:2]
+        yy, xx = np.ogrid[:height, :width]
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        inner = dist <= max(radius * 0.88, 1.0)
+        ring = (dist >= (radius * 0.88)) & (dist <= (radius * 1.18))
+        outer = (dist > (radius * 1.18)) & (dist <= (radius * 1.46))
+        if not np.any(inner) or not np.any(ring):
+            return 0.0
+
+        inner_mean = float(np.mean(gray[inner]))
+        ring_mean = float(np.mean(gray[ring]))
+        outer_mean = float(np.mean(gray[outer])) if np.any(outer) else inner_mean
+        edge_contrast = abs(ring_mean - inner_mean) / 255.0
+        bg_contrast = abs(ring_mean - outer_mean) / 255.0
+        return max(0.0, min((edge_contrast * 0.65) + (bg_contrast * 0.35), 1.0))
 
     def _select_failure_reason(
         self,
