@@ -5234,10 +5234,23 @@ class ObtencionCalibresWindow(BaseToolWindow):
         modo_estimacion: str,
         escala_fisica_fiable: bool,
         total_frutos_cv: int,
+        distribucion_cv: dict[str, float] | None = None,
+        patron_visible: bool = False,
+        prompt_source: str = "no_informado",
     ) -> dict[str, Any]:
         ajustado = dict(parsed_estimacion or {})
         advertencias = [str(item).strip() for item in ajustado.get("advertencias", []) if str(item).strip()]
         confianza = normalizar_confianza_ia(ajustado.get("confianza"))
+        prompt_source_norm = str(prompt_source or "").strip().lower() or "no_informado"
+        historico_aplicado = not bool(escala_fisica_fiable)
+        modo_calculo = "escala_pura" if escala_fisica_fiable else ("hibrido" if prompt_source_norm != "sqlite_exact" else "historico")
+
+        if escala_fisica_fiable:
+            advertencias = [
+                item
+                for item in advertencias
+                if "hist" not in item.lower() and "variedad" not in item.lower() and "barberina" not in item.lower()
+            ]
 
         if modo_estimacion == "cv_fuerte":
             if confianza is None:
@@ -5263,6 +5276,39 @@ class ObtencionCalibresWindow(BaseToolWindow):
             confianza = max(0.35, min(0.65, confianza))
 
         distribucion = ajustado.get("distribucion", [])
+        if escala_fisica_fiable and patron_visible:
+            distribucion_map: dict[str, float] = {}
+            if isinstance(distribucion, list):
+                for item in distribucion:
+                    if not isinstance(item, dict):
+                        continue
+                    calibre = str(item.get("calibre", "")).strip().upper()
+                    porcentaje = ObtencionCalibresWindow._confianza_a_float(item.get("porcentaje"))
+                    if calibre and porcentaje is not None:
+                        distribucion_map[calibre] = max(0.0, float(porcentaje))
+            peso_altos = sum(distribucion_map.get(f"CAL {idx}", 0.0) for idx in (7, 8, 9))
+            dominante = max(distribucion_map.items(), key=lambda kv: kv[1])[0] if distribucion_map else ""
+            dominancia_altos = peso_altos >= 45.0 or dominante in {"CAL 7", "CAL 8", "CAL 9"}
+            cv_disp = distribucion_cv if isinstance(distribucion_cv, dict) else {}
+            peso_bajos_cv = sum(max(0.0, float(cv_disp.get(f"CAL {idx}", 0.0) or 0.0)) for idx in (0, 1, 2, 3))
+            peso_altos_cv = sum(max(0.0, float(cv_disp.get(f"CAL {idx}", 0.0) or 0.0)) for idx in (7, 8, 9))
+            inconsistente = dominancia_altos and (peso_bajos_cv > peso_altos_cv if cv_disp else True)
+            if inconsistente and cv_disp:
+                ajustado["distribucion"] = [
+                    {"calibre": cal, "porcentaje": max(0.0, float(pct or 0.0))}
+                    for cal, pct in sorted(cv_disp.items(), key=lambda kv: kv[0])
+                ]
+                ajustado["calibre_dominante"] = max(cv_disp.items(), key=lambda kv: kv[1])[0]
+                aviso = (
+                    "Sanity check activado: resultado IA inconsistente con escala física fiable; "
+                    "se recalculó distribución ignorando histórico."
+                )
+                if aviso not in advertencias:
+                    advertencias.append(aviso)
+                modo_calculo = "escala_pura"
+                historico_aplicado = False
+
+        distribucion = ajustado.get("distribucion", [])
         dominante = str(ajustado.get("calibre_dominante", "") or "").strip()
         if dominante.lower() in {"", "-", "none", "null"} and isinstance(distribucion, list) and distribucion:
             items_validos: list[tuple[str, float]] = []
@@ -5281,6 +5327,8 @@ class ObtencionCalibresWindow(BaseToolWindow):
         ajustado["modo_estimacion"] = modo_estimacion
         ajustado["total_frutos_cv"] = int(total_frutos_cv)
         ajustado["escala_fisica_fiable"] = bool(escala_fisica_fiable)
+        ajustado["modo_calculo"] = modo_calculo
+        ajustado["historico_aplicado"] = bool(historico_aplicado)
         return ajustado
 
     def _build_historial_row(self, id_foto: str, estimacion: dict[str, Any]) -> dict[str, Any]:
@@ -6005,12 +6053,16 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         timeout_seconds=30,
                     )
                     parsed = self._parse_estimacion_ia_result(result)
-                    total_frutos_cv = int(self._resumen_medicion_cv(frutos_medidos_cv).get("total_frutos_medidos", 0) or 0)
+                    resumen_cv_actual = self._resumen_medicion_cv(frutos_medidos_cv)
+                    total_frutos_cv = int(resumen_cv_actual.get("total_frutos_medidos", 0) or 0)
                     parsed = self._aplicar_reglas_hibridas_estimacion(
                         parsed,
                         modo_estimacion=modo_estimacion,
                         escala_fisica_fiable=bool(patron_info["escala_fisica_fiable"]),
                         total_frutos_cv=total_frutos_cv,
+                        distribucion_cv=resumen_cv_actual.get("distribucion_cv", {}),
+                        patron_visible=bool(patron_info["patron_detectado"]),
+                        prompt_source=str(result.get("prompt_source", "") or "").strip() or "no_informado",
                     )
                     row.update(parsed)
                     row["task_enviada"] = "estimacion_calibres"
@@ -6022,7 +6074,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     row["estado_patron"] = patron_info["estado_deteccion_patron"]
                     row["escala_fisica_fiable"] = patron_info["escala_fisica_fiable"]
                     row["frutos_medidos_cv"] = [item.to_dict() for item in frutos_medidos_cv]
-                    row["resumen_medicion_cv"] = self._resumen_medicion_cv(frutos_medidos_cv)
+                    row["resumen_medicion_cv"] = resumen_cv_actual
                     row["modo_estimacion"] = modo_estimacion
                     advertencias_cv = self._advertencias_medicion_cv(bool(patron_info["escala_fisica_fiable"]), frutos_medidos_cv)
                     if advertencias_cv:
@@ -6221,6 +6273,9 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         modo_estimacion=modo_estimacion,
                         escala_fisica_fiable=bool(escala_info["escala_fisica_fiable"]),
                         total_frutos_cv=total_frutos_cv,
+                        distribucion_cv=resumen_cv.get("distribucion_cv", {}),
+                        patron_visible=bool(escala_info["patron_detectado"]),
+                        prompt_source=str(result.get("prompt_source", "") or "").strip() or "no_informado",
                     )
 
                     row_validacion = {
