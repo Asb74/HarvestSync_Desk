@@ -26,7 +26,9 @@ from calibres_vision import (
     CircleDetectionResult,
     CirclePatternDetector,
     FruitCaliberAnalyzer,
+    PhotoFruitMeasurement,
     PhotoFruitAnalysisResult,
+    medir_frutos_con_escala,
 )
 from client_examples.internal_ai_client import (
     InternalAIClientError,
@@ -5143,6 +5145,64 @@ class ObtencionCalibresWindow(BaseToolWindow):
             "escala_fisica_fiable": escala_fiable,
         }
 
+    def _obtener_raw_image_para_foto(self, id_foto: str) -> bytes | None:
+        cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+        card = cards_by_id.get(id_foto)
+        if isinstance(card, dict):
+            raw = card.get("raw")
+            if raw:
+                return raw
+            ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+            image_url = self._build_image_url_for_ai(ruta_local)
+            if image_url:
+                try:
+                    return self.data_service.descargar_imagen(image_url)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("No se pudo descargar imagen para medición CV id=%s error=%s", id_foto, exc)
+        return None
+
+    def _resumen_medicion_cv(self, mediciones: list[PhotoFruitMeasurement]) -> dict[str, Any]:
+        if not mediciones:
+            return {
+                "total_frutos_medidos": 0,
+                "distribucion_cv": {},
+                "diametro_medio_mm": None,
+                "calibre_dominante_cv": None,
+                "conteo_confianza": {"alta": 0, "media": 0, "baja": 0},
+            }
+        conteo: dict[str, int] = {}
+        conf = {"alta": 0, "media": 0, "baja": 0}
+        suma_mm = 0.0
+        for item in mediciones:
+            calibre = str(item.calibre_estimado or "SIN_RANGO")
+            conteo[calibre] = conteo.get(calibre, 0) + 1
+            if item.confianza_medicion in conf:
+                conf[item.confianza_medicion] += 1
+            suma_mm += float(item.diameter_mm)
+        total = len(mediciones)
+        distribucion = {k: round((v * 100.0) / total, 2) for k, v in sorted(conteo.items(), key=lambda kv: kv[0])}
+        dominante = max(conteo.items(), key=lambda kv: kv[1])[0] if conteo else None
+        return {
+            "total_frutos_medidos": total,
+            "distribucion_cv": distribucion,
+            "diametro_medio_mm": round(suma_mm / total, 2),
+            "calibre_dominante_cv": dominante,
+            "conteo_confianza": conf,
+        }
+
+    def _advertencias_medicion_cv(self, escala_fiable: bool, mediciones: list[PhotoFruitMeasurement]) -> list[str]:
+        advertencias: list[str] = []
+        if not escala_fiable:
+            advertencias.append("Escala física no fiable: medición CV no aplicada; fallback visual IA.")
+            return advertencias
+        total = len(mediciones)
+        if total < 10:
+            advertencias.append("Pocos frutos medidos por CV (<10); representatividad limitada.")
+        bajas = len([m for m in mediciones if m.confianza_medicion == "baja"])
+        if total > 0 and (bajas / total) >= 0.4:
+            advertencias.append("Alta proporción de mediciones CV con confianza baja.")
+        return advertencias
+
     def _build_historial_row(self, id_foto: str, estimacion: dict[str, Any]) -> dict[str, Any]:
         comparacion = self._comparacion_ia_vs_calibrador
         contexto = self._contexto_comparacion_actual
@@ -5790,17 +5850,36 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     contexto["id_foto"] = id_foto
                     contexto["image_url"] = image_url_for_ai
                     contexto["datos_escala_foto"] = patron_info
+                    frutos_medidos_cv: list[PhotoFruitMeasurement] = []
                     if patron_info["escala_fisica_fiable"]:
+                        raw_image = self._obtener_raw_image_para_foto(id_foto)
+                        if raw_image and patron_info.get("mm_por_px"):
+                            frutos_medidos_cv = medir_frutos_con_escala(
+                                image_bytes=raw_image,
+                                mm_por_px=float(patron_info["mm_por_px"]),
+                                rangos_calibres=rangos,
+                            )
+                        resumen_cv = self._resumen_medicion_cv(frutos_medidos_cv)
+                        contexto["frutos_medidos_cv"] = [item.to_dict() for item in frutos_medidos_cv]
+                        contexto["resumen_medicion_cv"] = resumen_cv
+                        contexto["advertencias_medicion_cv"] = self._advertencias_medicion_cv(True, frutos_medidos_cv)
                         contexto["instruccion_escala"] = (
                             "Usa obligatoriamente el patrón físico como escala real. "
                             f"Diámetro real patrón: {patron_info['diametro_patron_mm']:.2f} mm. "
                             f"Diámetro detectado: {float(patron_info['diametro_patron_px']):.2f} px. "
                             f"Escala: {float(patron_info['mm_por_px']):.5f} mm/px. "
-                            "Compara el diámetro ecuatorial de frutos completos contra los rangos."
+                            "Usa frutos_medidos_cv como fuente principal de tamaño/calibre. "
+                            "La imagen solo valida oclusión/coherencia. "
+                            "No devuelvas CAL 8/CAL 9 si los diámetros medidos caen en CAL 0..CAL 3. "
+                            "Si hay conflicto entre visión general y medición CV, prioriza medición CV."
                         )
                     else:
+                        contexto["frutos_medidos_cv"] = []
+                        contexto["resumen_medicion_cv"] = self._resumen_medicion_cv([])
+                        contexto["advertencias_medicion_cv"] = self._advertencias_medicion_cv(False, [])
                         contexto["instruccion_escala"] = (
-                            "La foto no dispone de escala física fiable. Reducir confianza de la estimación."
+                            "La foto no dispone de escala física fiable. Ejecuta solo análisis visual IA "
+                            "con confianza baja y explicita la limitación."
                         )
                     LOGGER.info(
                         "[Estimación IA] foto=%s patron_detectado=%s diametro_px=%s mm_por_px=%s estado=%s",
@@ -5840,6 +5919,15 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     row["mm_por_px"] = patron_info["mm_por_px"]
                     row["estado_patron"] = patron_info["estado_deteccion_patron"]
                     row["escala_fisica_fiable"] = patron_info["escala_fisica_fiable"]
+                    row["frutos_medidos_cv"] = [item.to_dict() for item in frutos_medidos_cv]
+                    row["resumen_medicion_cv"] = self._resumen_medicion_cv(frutos_medidos_cv)
+                    advertencias_cv = self._advertencias_medicion_cv(bool(patron_info["escala_fisica_fiable"]), frutos_medidos_cv)
+                    if advertencias_cv:
+                        advertencias_row = [str(item).strip() for item in row.get("advertencias", []) if str(item).strip()]
+                        for advertencia in advertencias_cv:
+                            if advertencia not in advertencias_row:
+                                advertencias_row.append(advertencia)
+                        row["advertencias"] = advertencias_row
                     row["error"] = not bool(parsed.get("es_valida"))
                     if not patron_info["escala_fisica_fiable"]:
                         advertencias_row = [str(item).strip() for item in row.get("advertencias", []) if str(item).strip()]
@@ -5940,16 +6028,32 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         raise ValueError("No se pudo construir image_url.")
 
                     escala_info = self._obtener_o_detectar_escala_foto({"id_foto": id_foto})
+                    frutos_medidos_cv: list[PhotoFruitMeasurement] = []
                     if escala_info["escala_fisica_fiable"]:
+                        raw_image = self._obtener_raw_image_para_foto(id_foto)
+                        if raw_image and escala_info.get("mm_por_px"):
+                            frutos_medidos_cv = medir_frutos_con_escala(
+                                image_bytes=raw_image,
+                                mm_por_px=float(escala_info["mm_por_px"]),
+                                rangos_calibres=rangos,
+                            )
+                        resumen_cv = self._resumen_medicion_cv(frutos_medidos_cv)
                         instruccion_escala = (
                             "Usa obligatoriamente el patrón físico como escala real. "
                             f"Diámetro real patrón: {escala_info['diametro_patron_mm']:.2f} mm. "
                             f"Diámetro detectado: {float(escala_info['diametro_patron_px']):.2f} px. "
                             f"Escala: {float(escala_info['mm_por_px']):.5f} mm/px. "
-                            "Compara el diámetro ecuatorial de frutos completos contra los rangos."
+                            "Usa frutos_medidos_cv como fuente principal de tamaño/calibre. "
+                            "La imagen solo valida oclusión/coherencia. "
+                            "No devuelvas CAL 8/CAL 9 si los diámetros medidos caen en CAL 0..CAL 3. "
+                            "Si hay conflicto entre visión general y medición CV, prioriza medición CV."
                         )
                     else:
-                        instruccion_escala = "La foto no dispone de escala física fiable. Reducir confianza de la estimación."
+                        resumen_cv = self._resumen_medicion_cv([])
+                        instruccion_escala = (
+                            "La foto no dispone de escala física fiable. Ejecuta solo análisis visual IA "
+                            "con confianza baja y explicita la limitación."
+                        )
 
                     contexto = {
                         "tipo_tarea": "analisis_calibres_completo",
@@ -5960,6 +6064,12 @@ class ObtencionCalibresWindow(BaseToolWindow):
                         "id_foto": id_foto,
                         "image_url": image_url_for_ai,
                         "datos_escala_foto": escala_info,
+                        "frutos_medidos_cv": [item.to_dict() for item in frutos_medidos_cv],
+                        "resumen_medicion_cv": resumen_cv,
+                        "advertencias_medicion_cv": self._advertencias_medicion_cv(
+                            bool(escala_info["escala_fisica_fiable"]),
+                            frutos_medidos_cv,
+                        ),
                         "instruccion_escala": instruccion_escala,
                         "respuesta_esperada": {
                             "formato": "json_estricto",
@@ -6013,6 +6123,15 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     row_estimacion["mm_por_px"] = escala_info["mm_por_px"]
                     row_estimacion["estado_patron"] = escala_info["estado_deteccion_patron"]
                     row_estimacion["escala_fisica_fiable"] = escala_info["escala_fisica_fiable"]
+                    row_estimacion["frutos_medidos_cv"] = [item.to_dict() for item in frutos_medidos_cv]
+                    row_estimacion["resumen_medicion_cv"] = resumen_cv
+                    advertencias_cv = self._advertencias_medicion_cv(bool(escala_info["escala_fisica_fiable"]), frutos_medidos_cv)
+                    if advertencias_cv:
+                        advertencias_row = [str(item).strip() for item in row_estimacion.get("advertencias", []) if str(item).strip()]
+                        for advertencia in advertencias_cv:
+                            if advertencia not in advertencias_row:
+                                advertencias_row.append(advertencia)
+                        row_estimacion["advertencias"] = advertencias_row
                     row_estimacion["error"] = not bool(parsed_estimacion.get("es_valida"))
                     if not escala_info["escala_fisica_fiable"]:
                         advertencias_row = [str(item).strip() for item in row_estimacion.get("advertencias", []) if str(item).strip()]
