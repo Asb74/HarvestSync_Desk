@@ -4903,27 +4903,76 @@ class ObtencionCalibresWindow(BaseToolWindow):
         return {calibre: (valor * 100.0 / total) for calibre, valor in acumulado.items()}
 
     def _get_patron_info_by_foto(self, id_foto: str) -> dict[str, Any]:
-        result = self._deteccion_resultados.get(id_foto)
-        diametro_patron_mm = float(self._config.diametro_patron_mm if self._config else 94.0)
-        if not result:
-            return {
-                "patron_detectado": False,
-                "diametro_patron_mm": diametro_patron_mm,
-                "diametro_patron_px": None,
-                "mm_por_px": None,
-                "estado_patron": "deteccion_no_ejecutada",
-                "warning_sin_escala": True,
-            }
-        estado = "detectado" if result.detected and result.mm_per_pixel is not None else "sin_patron"
-        if result.error and not result.detected:
-            estado = f"sin_patron: {result.error}"
+        escala_info = self._obtener_o_detectar_escala_foto({"id_foto": id_foto})
         return {
-            "patron_detectado": bool(result.detected and result.mm_per_pixel is not None),
+            "patron_detectado": bool(escala_info["patron_detectado"]),
+            "diametro_patron_mm": escala_info["diametro_patron_mm"],
+            "diametro_patron_px": escala_info["diametro_patron_px"],
+            "mm_por_px": escala_info["mm_por_px"],
+            "estado_patron": escala_info["estado_deteccion_patron"],
+            "warning_sin_escala": not bool(escala_info["escala_fisica_fiable"]),
+        }
+
+    def _obtener_o_detectar_escala_foto(self, foto: dict[str, Any]) -> dict[str, Any]:
+        id_foto = str((foto or {}).get("id_foto", "")).strip()
+        diametro_patron_mm = float(self._config.diametro_patron_mm) if self._config else 0.0
+        fallback = {
+            "patron_detectado": False,
+            "diametro_patron_mm": diametro_patron_mm,
+            "diametro_patron_px": None,
+            "mm_por_px": None,
+            "estado_deteccion_patron": "deteccion_no_ejecutada",
+            "escala_fisica_fiable": False,
+        }
+        if not id_foto:
+            fallback["estado_deteccion_patron"] = "foto_sin_id"
+            return fallback
+
+        result = self._deteccion_resultados.get(id_foto)
+        if result is None:
+            cards_by_id = {str(card.get("foto", {}).get("id_foto", "")): card for card in self._current_cards}
+            card = cards_by_id.get(id_foto)
+            raw_image = card.get("raw") if isinstance(card, dict) else None
+
+            if not raw_image and isinstance(card, dict):
+                ruta_local = str(card.get("foto", {}).get("ruta_local", "")).strip()
+                image_url = self._build_image_url_for_ai(ruta_local)
+                if image_url:
+                    try:
+                        raw_image = self.data_service.descargar_imagen(image_url)
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning(
+                            "Detección patrón previa a estimación IA: no se pudo descargar foto id=%s url=%s error=%s",
+                            id_foto,
+                            image_url,
+                            exc,
+                        )
+            if not raw_image:
+                fallback["estado_deteccion_patron"] = "imagen_no_disponible"
+                return fallback
+
+            detector = self._detector
+            if detector is None or abs(float(detector.diametro_real_mm) - diametro_patron_mm) > 1e-9:
+                detector = CirclePatternDetector(diametro_patron_mm)
+                self._detector = detector
+            result = detector.detect_from_bytes(id_foto, raw_image)
+            self._deteccion_resultados[id_foto] = result
+
+        escala_fiable = bool(result.detected and result.mm_per_pixel is not None and result.valid_for_next_step)
+        if escala_fiable:
+            estado = "ok"
+        elif result.error:
+            estado = f"sin_patron: {result.error}"
+        else:
+            estado = "sin_patron"
+
+        return {
+            "patron_detectado": escala_fiable,
             "diametro_patron_mm": diametro_patron_mm,
             "diametro_patron_px": float(result.diameter_px) if result.diameter_px is not None else None,
             "mm_por_px": float(result.mm_per_pixel) if result.mm_per_pixel is not None else None,
-            "estado_patron": estado,
-            "warning_sin_escala": not bool(result.detected and result.mm_per_pixel is not None),
+            "estado_deteccion_patron": estado,
+            "escala_fisica_fiable": escala_fiable,
         }
 
     def _build_historial_row(self, id_foto: str, estimacion: dict[str, Any]) -> dict[str, Any]:
@@ -5500,7 +5549,7 @@ class ObtencionCalibresWindow(BaseToolWindow):
         cultivo_payload = self._resolver_cultivo_ia()
         variedad = self._resolver_variedad_ia(cultivo_payload)
         rangos = self._config.rangos_por_cultivo.get(cultivo, []) if self._config else []
-        diametro_patron = self._config.diametro_patron_mm if self._config else 94.0
+        diametro_patron = float(self._config.diametro_patron_mm) if self._config else 0.0
         if not rangos:
             messagebox.showwarning(
                 "Obtención calibres",
@@ -5562,29 +5611,31 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     image_url_for_ai = self._build_image_url_for_ai(ruta_local)
                     if not image_url_for_ai:
                         raise ValueError("No se pudo construir image_url.")
-                    patron_info = self._get_patron_info_by_foto(id_foto)
+                    patron_info = self._obtener_o_detectar_escala_foto({"id_foto": id_foto})
                     contexto = dict(contexto_base)
                     contexto["id_foto"] = id_foto
                     contexto["image_url"] = image_url_for_ai
-                    contexto["datos_escala_foto"] = {
-                        "patron_detectado": patron_info["patron_detectado"],
-                        "diametro_patron_mm": patron_info["diametro_patron_mm"],
-                        "diametro_patron_px": patron_info["diametro_patron_px"],
-                        "mm_por_px": patron_info["mm_por_px"],
-                        "estado_deteccion_patron": patron_info["estado_patron"],
-                        "escala_fisica_fiable": not patron_info["warning_sin_escala"],
-                    }
-                    if patron_info["patron_detectado"]:
+                    contexto["datos_escala_foto"] = patron_info
+                    if patron_info["escala_fisica_fiable"]:
                         contexto["instruccion_escala"] = (
-                            "Usar el patrón como escala física obligatoria si está detectado. "
-                            "Comparar frutos completos y bien visibles contra el marcador de 94 mm. "
-                            "No basar la estimación solo en impresión visual general y no usar frutos parcialmente ocultos como evidencia principal."
+                            "Usa obligatoriamente el patrón físico como escala real. "
+                            f"Diámetro real patrón: {patron_info['diametro_patron_mm']:.2f} mm. "
+                            f"Diámetro detectado: {float(patron_info['diametro_patron_px']):.2f} px. "
+                            f"Escala: {float(patron_info['mm_por_px']):.5f} mm/px. "
+                            "Compara el diámetro ecuatorial de frutos completos contra los rangos."
                         )
                     else:
                         contexto["instruccion_escala"] = (
-                            "La foto no dispone de escala física fiable. "
-                            "Reducir confianza de la estimación y advertir: 'Foto estimada sin escala física fiable.'."
+                            "La foto no dispone de escala física fiable. Reducir confianza de la estimación."
                         )
+                    LOGGER.info(
+                        "[Estimación IA] foto=%s patron_detectado=%s diametro_px=%s mm_por_px=%s estado=%s",
+                        id_foto,
+                        patron_info["patron_detectado"],
+                        patron_info["diametro_patron_px"],
+                        patron_info["mm_por_px"],
+                        patron_info["estado_deteccion_patron"],
+                    )
                     LOGGER.info(
                         "Estimación IA request: id_foto=%s image_url=%s task=%s cultivo=%s variedad=%s rangos=%s patron=%s mm_px=%s",
                         id_foto,
@@ -5613,10 +5664,10 @@ class ObtencionCalibresWindow(BaseToolWindow):
                     row["patron_detectado"] = patron_info["patron_detectado"]
                     row["diametro_patron_px"] = patron_info["diametro_patron_px"]
                     row["mm_por_px"] = patron_info["mm_por_px"]
-                    row["estado_patron"] = patron_info["estado_patron"]
-                    row["escala_fisica_fiable"] = not patron_info["warning_sin_escala"]
+                    row["estado_patron"] = patron_info["estado_deteccion_patron"]
+                    row["escala_fisica_fiable"] = patron_info["escala_fisica_fiable"]
                     row["error"] = not bool(parsed.get("es_valida"))
-                    if patron_info["warning_sin_escala"]:
+                    if not patron_info["escala_fisica_fiable"]:
                         advertencias_row = [str(item).strip() for item in row.get("advertencias", []) if str(item).strip()]
                         if "Foto estimada sin escala física fiable." not in advertencias_row:
                             advertencias_row.append("Foto estimada sin escala física fiable.")
